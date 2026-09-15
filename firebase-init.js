@@ -2,10 +2,10 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/fireba
   import {
     getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged,
     createUserWithEmailAndPassword, signInWithEmailAndPassword,
-    sendPasswordResetEmail, sendEmailVerification
+    sendPasswordResetEmail, sendEmailVerification, deleteUser
   } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
   import {
-    getFirestore, doc, getDoc, setDoc, updateDoc, arrayUnion,
+    getFirestore, doc, getDoc, setDoc, updateDoc, arrayUnion, deleteDoc,
     initializeFirestore, persistentLocalCache, persistentMultipleTabManager
   } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
   import {
@@ -115,6 +115,22 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/fireba
     async deletePhoto(url){
       try{ await deleteObject(ref(storage, url)); }
       catch(e){ /* already gone or never existed — nothing to clean up */ }
+    },
+    /* Full account teardown: delete the user's data doc, then the Auth user.
+       (Storage photos are best-effort deleted by the app before calling this,
+       since it holds the URLs.) deleteUser throws requires-recent-login if the
+       session is stale — the app surfaces that with a friendly message. */
+    async deleteAccount(){
+      const user = auth.currentUser;
+      if(!user) throw new Error('Not signed in');
+      try{ await deleteDoc(doc(db, 'stashes', user.uid)); }catch(e){ /* may not exist */ }
+      await deleteUser(user);
+    },
+    /* Support message — written to a 'support' collection you can read in the
+       Firebase console; a Cloud Function can watch it to email you. */
+    async sendSupport(payload){
+      const id = 'msg_' + Date.now() + '_' + Math.random().toString(36).slice(2,8);
+      await setDoc(doc(db, 'support', id), payload);
     }
   };
 

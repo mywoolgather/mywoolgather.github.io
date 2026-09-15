@@ -4,6 +4,28 @@
 const STATUS_COLORS = { Planned:'#6E6178', WIP:'#8B5FA3', Finished:'#3E6B49', Frogged:'#7A2F4B' };
 const CHART_COLORS = ['#3E6B49','#5C3A72','#9B7EC0','#8FAF7C','#6E6178'];
 const WEIGHTS = ["Lace","Fingering","Sport","DK","Worsted","Aran","Bulky","Super Bulky"];
+/* Display metadata for weight categories — CYC number + common aliases so
+   people whose brand uses a different term (8-ply, chunky, etc.) recognize
+   it. Keys must match WEIGHTS exactly; internal values/order are unchanged
+   so Palette Lab weight-matching and existing saved yarns keep working.
+   (Letter-group systems e.g. Drops A–F are on the backlog — not standardized
+   enough to map reliably.) */
+const WEIGHT_META = {
+  "Lace":        { cyc:0, aliases:["cobweb","2-ply","thread","light fingering"] },
+  "Fingering":   { cyc:1, aliases:["sock","4-ply","super fine","baby"] },
+  "Sport":       { cyc:2, aliases:["5-ply","fine"] },
+  "DK":          { cyc:3, aliases:["light worsted","8-ply","double knit"] },
+  "Worsted":     { cyc:4, aliases:["afghan","10-ply","medium"] },
+  "Aran":        { cyc:4, aliases:["heavy worsted","12-ply"] },
+  "Bulky":       { cyc:5, aliases:["chunky","craft","14-ply"] },
+  "Super Bulky": { cyc:6, aliases:["super chunky","roving"] }
+};
+function weightLabel(name){
+  const m = WEIGHT_META[name];
+  if(!m) return name;
+  const alias = m.aliases && m.aliases.length ? ` (${m.aliases.slice(0,2).join(', ')})` : '';
+  return `${m.cyc} · ${name}${alias}`;
+}
 const STATUSES = ["Planned","WIP","Finished","Frogged"];
 const GARMENT_SIZES = ["XS","S","M","L","XL","2X","3X","One size"];
 const HARMONIES = ["Complementary","Analogous","Triadic","Split-Complementary"];
@@ -92,6 +114,8 @@ let STATE = {
   showShoppingForm: false,
   editingShoppingId: null,
   authMode: 'signin',
+  unitPref: 'yd',   // 'yd' | 'm' — display/input unit; storage is always yards
+  expandedCounters: null,   // project id whose counter panel is open
   stashSearch: '',
   stashFilterWeight: 'All weights',
   stashFilterFiber: 'All fibers',
@@ -112,6 +136,7 @@ let pendingProjectYarnUsage = [];
 let pendingProjectYarnRequired = [];
 let pendingProjectLinks = [];
 let pendingProjectPhotos = [];
+let pendingProjectCounters = [];
 let fiberChartInstance = null;
 let statusChartInstance = null;
 
@@ -125,11 +150,60 @@ let statusChartInstance = null;
 async function persist(){
   if(!STATE.user) return;
   try{
-    await window.FB.saveUserData(STATE.user.uid, { yarns: STATE.yarns, projects: STATE.projects, palettes: STATE.paletteSavedPalettes, shoppingList: STATE.shoppingList });
+    await window.FB.saveUserData(STATE.user.uid, { yarns: STATE.yarns, projects: STATE.projects, palettes: STATE.paletteSavedPalettes, shoppingList: STATE.shoppingList, prefs: { unitPref: STATE.unitPref } });
   }catch(e){
     console.error('Save failed', e);
     wgToast("Couldn't save to your account — check your connection and try again.", "error");
   }
+}
+/* Deferred save for high-frequency edits (row counters). Increments update
+   in-memory immediately; the write is deferred to a 10-second safety
+   checkpoint, and flushed immediately when the page is hidden/closed — so a
+   normal exit always persists and the worst-case crash loss is ~10s of taps.
+   No per-tap write (would spam Firestore) and no nagging "unsaved" warning. */
+let _pendingCheckpoint = null;
+function persistSoon(){
+  if(_pendingCheckpoint) return;               // already scheduled
+  _pendingCheckpoint = setTimeout(()=>{ _pendingCheckpoint = null; persist(); }, 10000);
+}
+function flushPending(){
+  if(_pendingCheckpoint){ clearTimeout(_pendingCheckpoint); _pendingCheckpoint = null; persist(); }
+}
+/* Preserve an open Add/Edit form across tab-switches (e.g. user leaves to
+   convert meters or look up a colorway, then returns). We snapshot every
+   form field's current value when the page hides, and restore them when it
+   comes back if a form is still open — so nothing typed is lost. In-session
+   only; not persisted to the account. */
+let _formSnapshot = null;
+function snapshotOpenForm(){
+  if(!(STATE.showYarnForm || STATE.showProjectForm || STATE.showShoppingForm)) { _formSnapshot = null; return; }
+  const form = document.querySelector('#inner-tab-content form, .fullscreen-form form');
+  if(!form) return;
+  const snap = {};
+  form.querySelectorAll('input, select, textarea').forEach(el=>{
+    if(el.id) snap[el.id] = (el.type==='checkbox') ? el.checked : el.value;
+  });
+  _formSnapshot = snap;
+}
+function restoreOpenForm(){
+  if(!_formSnapshot) return;
+  const form = document.querySelector('#inner-tab-content form, .fullscreen-form form');
+  if(!form){ _formSnapshot = null; return; }
+  Object.entries(_formSnapshot).forEach(([id,val])=>{
+    const el = document.getElementById(id);
+    if(!el) return;
+    if(el.type==='checkbox') el.checked = val; else el.value = val;
+  });
+  _formSnapshot = null;
+}
+// Flush pending saves + snapshot open forms on backgrounding; restore on return.
+if(typeof window !== 'undefined'){
+  window.addEventListener('visibilitychange', ()=>{
+    if(document.visibilityState==='hidden'){ flushPending(); snapshotOpenForm(); }
+    else if(document.visibilityState==='visible'){ restoreOpenForm(); }
+  });
+  window.addEventListener('pagehide', ()=>{ flushPending(); snapshotOpenForm(); });
+  window.addEventListener('beforeunload', flushPending);
 }
 async function loadPresetsFromFirestore(){
   try{
@@ -213,6 +287,18 @@ function wgPrompt(message, { title='', defaultValue='', okLabel='Save', placehol
   });
 }
 function yarnTotalYardage(y){ return (Number(y.skeinYardage)||0) * (Number(y.quantity)||1); }
+/* Length units. Storage is always canonical yards; these convert only at the
+   display/input edges based on the user's preference. */
+const YD_PER_M = 1.0936133;
+function unitLabel(){ return STATE.unitPref === 'm' ? 'm' : 'yd'; }
+function toDisplayLength(yards){          // canonical yd -> shown value
+  const v = STATE.unitPref === 'm' ? (Number(yards)||0) / YD_PER_M : (Number(yards)||0);
+  return Math.round(v);
+}
+function fromInputLength(shown){          // user-entered value -> canonical yd
+  const n = Number(shown)||0;
+  return STATE.unitPref === 'm' ? Math.round(n * YD_PER_M) : n;
+}
 function yarnStatus(y){ return y.status || 'available'; }
 /* "Brand - Line - Colorway" for Palette Lab, since that's where knowing
    exactly which skein you're looking at matters most. Falls back
@@ -684,8 +770,8 @@ function render(){
        </div>`
     : `<div class="header-actions">
          <span class="note">${esc(STATE.user.displayName || STATE.user.email || 'Signed in')}</span>
+         <button class="btn btn-ghost btn-small" onclick="openSettings()">${ICONS.gear} Settings</button>
          <button class="btn btn-ghost btn-small" onclick="window.FB.signOutUser()">Sign out</button>
-         <button class="reset-btn" onclick="resetAll()">${ICONS.reset} Clear my data</button>
        </div>`;
 
   app.innerHTML = `
@@ -769,11 +855,100 @@ function renderSettingsSheet(){
     : `<div class="sheet">
         <div class="sheet-handle"></div>
         <p style="padding:2px 22px 10px; font-family:'Fraunces',serif; font-weight:600;">Settings</p>
-        <p class="note" style="padding:0 22px 10px;">${esc(STATE.user.displayName || STATE.user.email || 'Signed in')}</p>
+        <p class="note" style="padding:0 22px 12px;">${esc(STATE.user.displayName || STATE.user.email || 'Signed in')}</p>
+        <div style="padding:0 22px 12px;">
+          <span class="note" style="display:block; margin-bottom:6px;">Length unit</span>
+          <div style="display:flex; gap:6px;">
+            <button class="harmony-btn ${STATE.unitPref==='yd'?'active':''}" onclick="setUnitPref('yd')">Yards</button>
+            <button class="harmony-btn ${STATE.unitPref==='m'?'active':''}" onclick="setUnitPref('m')">Meters</button>
+          </div>
+        </div>
         <button onclick="window.FB.signOutUser()">${ICONS.reset}<span>Sign out</span></button>
         <button onclick="closeSettings(); resetAll();" class="danger-text">${ICONS.trash}<span>Clear my data</span></button>
+        <div class="sheet-divider"></div>
+        <button onclick="closeSettings(); openSupportForm();">${ICONS.link}<span>Contact / support</span></button>
+        <button onclick="closeSettings(); startDeleteAccount();" class="danger-text">${ICONS.trash}<span>Delete account</span></button>
       </div>`;
   document.getElementById('app').appendChild(div);
+}
+function setUnitPref(u){
+  STATE.unitPref = u;
+  persist();
+  renderSettingsSheet();  // refresh the toggle's active state
+  renderTab();            // re-render current tab with new units
+}
+/* Delete account — deliberately steers toward the less-drastic "Clear all
+   data" first, then requires an explicit irreversible confirmation, then
+   tears down Firestore data, Storage photos, and the Auth user itself. */
+/* Contact / support — an in-app form written to the 'support' Firestore
+   collection. A Cloud Function watches that collection and emails it to you
+   (see support-email setup). Uses the styled modal, not a browser dialog. */
+function openSupportForm(){
+  const root = document.getElementById('wg-modal-root');
+  root.innerHTML = `<div class="wg-modal-backdrop" id="wg-modal-bd">
+    <div class="wg-modal" role="dialog" aria-modal="true">
+      <h3>Contact / support</h3>
+      <p>Found a bug or have a suggestion? Send it straight to the maker.</p>
+      <textarea id="support-msg" rows="4" style="width:100%; box-sizing:border-box; margin-bottom:12px; font-family:inherit; font-size:0.87rem; padding:8px 10px; border-radius:6px; border:1px solid var(--border);" placeholder="What's on your mind?"></textarea>
+      <div class="wg-modal-actions">
+        <button class="btn btn-ghost" id="support-cancel">Cancel</button>
+        <button class="btn btn-primary" id="support-send">Send</button>
+      </div>
+    </div>
+  </div>`;
+  const bd = document.getElementById('wg-modal-bd');
+  requestAnimationFrame(()=> bd.classList.add('open'));
+  const close = ()=>{ bd.classList.remove('open'); setTimeout(()=>{ root.innerHTML=''; }, 160); };
+  document.getElementById('support-cancel').onclick = close;
+  bd.onclick = (e)=>{ if(e.target===bd) close(); };
+  document.getElementById('support-send').onclick = async ()=>{
+    const msg = document.getElementById('support-msg').value.trim();
+    if(!msg){ wgToast('Please enter a message first.', 'error'); return; }
+    if(window.WG_DEMO){ close(); wgToast('Thanks! (Support is disabled in the demo.)', 'success'); return; }
+    if(!STATE.online){ wgToast("You're offline — try sending when reconnected.", 'error'); return; }
+    try{
+      await window.FB.sendSupport({
+        message: msg,
+        fromUid: STATE.user ? STATE.user.uid : null,
+        fromEmail: STATE.user ? (STATE.user.email || null) : null,
+        userAgent: navigator.userAgent,
+        createdAt: new Date().toISOString()
+      });
+      close();
+      wgToast('Message sent — thank you!', 'success');
+    }catch(err){
+      console.error('support send failed', err);
+      wgToast("Couldn't send just now — please try again.", 'error');
+    }
+  };
+}
+
+async function startDeleteAccount(){
+  const softer = await wgConfirm(
+    "If you only want to empty your stash and projects, use \u201cClear my data\u201d instead \u2014 it keeps your login. Delete account removes everything permanently, including your login. Continue to permanent deletion?",
+    { title:'Before you delete', okLabel:'Continue', danger:true }
+  );
+  if(!softer) return;
+  const sure = await wgConfirm(
+    "This permanently deletes your account, all your yarns, projects, palettes, photos, and login. This cannot be undone.",
+    { title:'Delete account permanently?', okLabel:'Delete everything', danger:true }
+  );
+  if(!sure) return;
+  try{
+    // Best-effort: delete the user's project photos from Storage first (the
+    // app holds their URLs; the auth-user teardown can't reach them after).
+    const photoUrls = [];
+    STATE.projects.forEach(p => (p.photos||[]).forEach(u => photoUrls.push(u)));
+    for(const url of photoUrls){ try{ await window.FB.deletePhoto(url); }catch(e){} }
+    await window.FB.deleteAccount();
+    wgToast('Your account has been deleted.', 'success');
+  }catch(err){
+    if(err && err.code === 'auth/requires-recent-login'){
+      wgToast('For security, please sign out and back in, then delete again.', 'error');
+    } else {
+      wgToast(friendlyAuthError ? friendlyAuthError(err) : 'Could not delete account.', 'error');
+    }
+  }
 }
 function closeSettings(){ STATE.settingsOpen = false; const s=document.getElementById('settings-sheet'); if(s) s.remove(); }
 
@@ -956,7 +1131,7 @@ function renderOverview(){
   const s = computeStats();
   let html = `<div class="stat-grid">
     ${statTile('Yarns logged', STATE.yarns.length)}
-    ${statTile('Total yardage', Math.round(s.totalYardage).toLocaleString())}
+    ${statTile('Total '+unitLabel(), toDisplayLength(s.totalYardage).toLocaleString())}
     ${statTile('Stash used', s.utilization.toFixed(0)+'%', 'in finished projects')}
     ${statTile('In progress', s.wipCount)}
     ${statTile('Oldest WIP', s.oldestWipDays!=null ? s.oldestWipDays+'d' : '—')}
@@ -995,9 +1170,9 @@ function renderCharts(){
     if(fiberChartInstance) fiberChartInstance.destroy();
     fiberChartInstance = new Chart(fiberCanvas, {
       type:'bar',
-      data:{ labels:s.fiberData.map(d=>d.fiber), datasets:[{ data:s.fiberData.map(d=>d.yards), backgroundColor: s.fiberData.map((_,i)=>CHART_COLORS[i%CHART_COLORS.length]), borderRadius:4 }] },
+      data:{ labels:s.fiberData.map(d=>d.fiber), datasets:[{ data:s.fiberData.map(d=>toDisplayLength(d.yards)), backgroundColor: s.fiberData.map((_,i)=>CHART_COLORS[i%CHART_COLORS.length]), borderRadius:4 }] },
       options:{ indexAxis:'y', responsive:true, maintainAspectRatio:false,
-        plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label:(ctx)=>ctx.parsed.x+' yd' } } },
+        plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label:(ctx)=>ctx.parsed.x+' '+unitLabel() } } },
         scales:{ x:{ grid:{display:false} }, y:{ grid:{display:false} } } }
     });
   }
@@ -1034,7 +1209,7 @@ function renderStash(){
     html += `<div class="stash-controls">
       <input type="text" placeholder="Search brand, line, colorway…" value="${esc(STATE.stashSearch||'')}" oninput="setStashSearch(this.value)" style="flex:1; min-width:140px;" />
       <select onchange="STATE.stashFilterWeight=this.value; renderTab();">
-        ${weightOpts.map(w=>`<option ${(STATE.stashFilterWeight||'All weights')===w?'selected':''}>${w}</option>`).join('')}
+        ${weightOpts.map(w=>`<option value="${esc(w)}" ${(STATE.stashFilterWeight||'All weights')===w?'selected':''}>${w==='All weights'?w:esc(weightLabel(w))}</option>`).join('')}
       </select>
       <select onchange="STATE.stashFilterFiber=this.value; renderTab();">
         ${fiberCats.map(f=>`<option ${(STATE.stashFilterFiber||'All fibers')===f?'selected':''}>${f}</option>`).join('')}
@@ -1128,31 +1303,39 @@ function renderYarnForm(){
     </label>`}
 
     <label class="field">Brand
-      <input id="yf-brand" placeholder="Malabrigo" value="${v('brand')}" />
+      <input id="yf-brand" placeholder="Malabrigo" value="${v('brand')}" list="yf-brand-history" onchange="autofillFromHistory()" />
+      <datalist id="yf-brand-history">${[...new Set(STATE.yarns.map(y=>y.brand).filter(Boolean))].map(b=>`<option value="${esc(b)}"></option>`).join('')}</datalist>
     </label>
     <label class="field">Line
-      <input id="yf-line" required placeholder="Rios" value="${editing ? esc(editing.line ?? editing.name ?? '') : ''}" />
+      <input id="yf-line" required placeholder="Rios" value="${editing ? esc(editing.line ?? editing.name ?? '') : ''}" list="yf-line-history" onchange="autofillFromHistory()" />
+      <datalist id="yf-line-history">${[...new Set(STATE.yarns.map(y=>y.line).filter(Boolean))].map(l=>`<option value="${esc(l)}"></option>`).join('')}</datalist>
     </label>
     <label class="field">Colorway
       <input id="yf-colorway" placeholder="Ravelry Red" value="${v('colorway')}" />
+    </label>
+    <label class="field">Colorway number (optional)
+      <input id="yf-colorwaynum" placeholder="e.g. 611" value="${v('colorwayNumber')}" />
+    </label>
+    <label class="field">Dye lot (optional)
+      <input id="yf-dyelot" placeholder="e.g. 4521" value="${v('dyeLot')}" />
     </label>
 
     <label class="field">Fiber content
       <input id="yf-fiber" placeholder="100% superwash merino" value="${v('fiber')}" />
     </label>
     <label class="field">Weight category
-      <select id="yf-weightcat">${WEIGHTS.map(w=>`<option ${(editing?editing.weightCategory===w:w==='Worsted')?'selected':''}>${w}</option>`).join('')}</select>
+      <select id="yf-weightcat">${WEIGHTS.map(w=>`<option value="${esc(w)}" ${(editing?editing.weightCategory===w:w==='Worsted')?'selected':''}>${esc(weightLabel(w))}</option>`).join('')}</select>
     </label>
 
     <label class="field">Skein weight (g)
       <input id="yf-skeinweight" type="number" min="0" placeholder="100" value="${v('skeinWeightGrams')}" />
     </label>
-    <label class="field">Yardage per skein
-      <input id="yf-skeinyardage" type="number" min="0" placeholder="220" value="${v('skeinYardage')}" />
+    <label class="field">Yardage per skein (${unitLabel()})
+      <input id="yf-skeinyardage" type="number" min="0" placeholder="220" value="${editing ? toDisplayLength(editing.skeinYardage) : ''}" />
     </label>
 
     <label class="field">Quantity (skeins)
-      <input id="yf-quantity" type="number" min="1" value="${editing ? esc(editing.quantity) : 1}" />
+      <input id="yf-quantity" type="number" min="0" step="any" placeholder="1.5" value="${editing ? esc(editing.quantity) : 1}" />
     </label>
     <label class="field">Cost per skein (optional)
       <input id="yf-cost" type="number" min="0" step="0.01" value="${v('cost')}" />
@@ -1207,7 +1390,26 @@ function onLineChange(){
   document.getElementById('yf-fiber').value = preset.fiber;
   document.getElementById('yf-weightcat').value = preset.weightCategory;
   document.getElementById('yf-skeinweight').value = preset.skeinWeightGrams;
-  document.getElementById('yf-skeinyardage').value = preset.skeinYardage;
+  document.getElementById('yf-skeinyardage').value = toDisplayLength(preset.skeinYardage);
+}
+/* Auto-fill specs from the user's OWN stash history: if the entered brand+line
+   matches a yarn they've logged before, fill any *empty* spec fields (fiber,
+   weight, skein weight, yardage) from that past entry. Only fills blanks, so
+   it never clobbers what the user has already typed. */
+function autofillFromHistory(){
+  const brand = (document.getElementById('yf-brand').value||'').trim().toLowerCase();
+  const line = (document.getElementById('yf-line').value||'').trim().toLowerCase();
+  if(!brand && !line) return;
+  const match = STATE.yarns.find(y =>
+    (y.brand||'').trim().toLowerCase()===brand &&
+    (y.line||'').trim().toLowerCase()===line && (brand||line)
+  );
+  if(!match) return;
+  const fillIfEmpty = (id, val)=>{ const el=document.getElementById(id); if(el && !el.value && val!=null && val!=='') el.value = val; };
+  fillIfEmpty('yf-fiber', match.fiber);
+  if(match.weightCategory){ const el=document.getElementById('yf-weightcat'); if(el) el.value = match.weightCategory; }
+  fillIfEmpty('yf-skeinweight', match.skeinWeightGrams || '');
+  fillIfEmpty('yf-skeinyardage', match.skeinYardage ? toDisplayLength(match.skeinYardage) : '');
 }
 
 function handlePhotoUpload(e){
@@ -1257,7 +1459,8 @@ async function processLabelScan(file){
     if(parsed.line && fillIfEmpty('yf-line', parsed.line)) filled++;
     if(parsed.fiber && fillIfEmpty('yf-fiber', parsed.fiber)) filled++;
     if(parsed.colorway && fillIfEmpty('yf-colorway', parsed.colorway)) filled++;
-    if(parsed.skeinYardage && fillIfEmpty('yf-skeinyardage', parsed.skeinYardage)) filled++;
+    if(parsed.dyeLot && fillIfEmpty('yf-dyelot', parsed.dyeLot)) filled++;
+    if(parsed.skeinYardage && fillIfEmpty('yf-skeinyardage', toDisplayLength(parsed.skeinYardage))) filled++;
     if(parsed.skeinWeightGrams && fillIfEmpty('yf-skeinweight', parsed.skeinWeightGrams)) filled++;
     if(parsed.weightCategory){ const el=document.getElementById('yf-weightcat'); if(el){ el.value=parsed.weightCategory; filled++; } }
     setStatus('');
@@ -1484,11 +1687,14 @@ function handleSaveYarn(e){
     brand,
     line,
     colorway: document.getElementById('yf-colorway').value.trim(),
+    colorwayNumber: document.getElementById('yf-colorwaynum').value.trim(),
+    dyeLot: document.getElementById('yf-dyelot').value.trim(),
     fiber: document.getElementById('yf-fiber').value.trim(),
     weightCategory: document.getElementById('yf-weightcat').value,
     skeinWeightGrams: Number(document.getElementById('yf-skeinweight').value) || 0,
-    skeinYardage: Number(document.getElementById('yf-skeinyardage').value) || 0,
+    skeinYardage: fromInputLength(document.getElementById('yf-skeinyardage').value) || 0,
     quantity: Number(document.getElementById('yf-quantity').value) || 1,
+    // (accepts decimals like 1.5 for partial/scrap skeins)
     cost: document.getElementById('yf-cost').value === '' ? null : Number(document.getElementById('yf-cost').value),
     purchaseDate: document.getElementById('yf-purchasedate').value || null,
     isMulticolor: multicolor,
@@ -1518,7 +1724,7 @@ async function deleteYarn(id){
   renderTab();
 }
 function changeRemaining(id, val){
-  const n = val==='' ? 0 : Number(val);
+  const n = val==='' ? 0 : fromInputLength(val);
   STATE.yarns = STATE.yarns.map(y => y.id===id ? {...y, yardageRemaining:n} : y);
   persist();
 }
@@ -1544,7 +1750,7 @@ function refreshYarnPicker(){
 
 function renderYarnCard(y){
   const total = yarnTotalYardage(y);
-  const subtitle = y.colorway ? esc(y.colorway) : '';
+  const subtitle = [y.colorway, y.colorwayNumber ? '#'+y.colorwayNumber : ''].filter(Boolean).map(esc).join(' · ');
   const allocated = yarnStatus(y)==='allocated';
   const allocatedProject = allocated && y.allocatedTo ? STATE.projects.find(p=>p.id===y.allocatedTo) : null;
   const multi = y.isMulticolor && y.colors && y.colors.length>=2;
@@ -1578,10 +1784,11 @@ function renderYarnCard(y){
       <span>${esc(categorizeFiber(y.fiber))}</span>
       <span>${esc(y.weightCategory||'')}</span>
     </div>
+    ${y.dyeLot ? `<p class="note" style="margin:6px 0 0; font-size:0.7rem;">Dye lot ${esc(y.dyeLot)}</p>` : ''}
     <div class="yarn-bottom">
       <span>
-        <input type="number" value="${y.yardageRemaining}" onchange="changeRemaining('${y.id}', this.value)" />
-        / ${total} yd <span class="note">(${y.quantity}× ${y.skeinYardage}yd)</span>
+        <input type="number" value="${toDisplayLength(y.yardageRemaining)}" onchange="changeRemaining('${y.id}', this.value)" />
+        / ${toDisplayLength(total)} ${unitLabel()} <span class="note">(${y.quantity}× ${toDisplayLength(y.skeinYardage)}${unitLabel()})</span>
       </span>
       ${y.cost ? `<span class="note">$${(Number(y.cost)*y.quantity).toFixed(2)}</span>` : ''}
     </div>
@@ -1663,6 +1870,7 @@ function cleanupOpenForms(){
   pendingProjectYarnUsage = [];
   pendingProjectYarnRequired = [];
   pendingProjectPhotos = [];
+  pendingProjectCounters = [];
 }
 
 function showProjectForm(id){
@@ -1675,6 +1883,7 @@ function showProjectForm(id){
   pendingProjectYarnUsage = editing ? (editing.yarnUsage||[]).map(u=>({...u})) : [];
   pendingProjectYarnRequired = editing ? (editing.yarnRequired||[]).map(u=>({...u})) : [];
   pendingProjectPhotos = editing ? [...(editing.photos||[])] : [];
+  pendingProjectCounters = editing ? (editing.counters||[]).map(c=>({...c})) : [];
   renderTab();
 }
 function hideProjectForm(){ cleanupOpenForms(); renderTab(); }
@@ -1683,6 +1892,46 @@ function hideProjectForm(){ cleanupOpenForms(); renderTab(); }
    philosophy as the yarn picker's allocate/remove actions), scoped to
    STATE.editingProjectId, which is reserved up front even for a brand-new
    project so the Storage path is stable before the project is ever saved. */
+/* Row-counter configuration UI (inside the project edit form). Add/name/
+   remove counters and set an optional "repeat every N" here; the actual
+   +/− tapping happens from the project row. Edits are in-memory until the
+   project is saved, consistent with the rest of the form. */
+function buildCountersConfigHTML(){
+  const rows = pendingProjectCounters.map((c,i)=>`
+    <div class="row" style="margin-bottom:8px;">
+      <input type="text" value="${esc(c.name||'')}" placeholder="Counter name" style="flex:1; min-width:100px;" onchange="updatePendingCounter(${i},'name',this.value)" />
+      <label class="note" style="display:flex; align-items:center; gap:4px; white-space:nowrap;">start
+        <input type="number" min="0" value="${Number(c.value)||0}" style="width:56px;" onchange="updatePendingCounter(${i},'value',this.value)" />
+      </label>
+      <label class="note" style="display:flex; align-items:center; gap:4px; white-space:nowrap;">repeat&nbsp;every
+        <input type="number" min="0" value="${c.repeat||''}" placeholder="—" style="width:52px;" onchange="updatePendingCounter(${i},'repeat',this.value)" />
+      </label>
+      <button type="button" class="del-btn" onclick="removePendingCounter(${i})" aria-label="Remove counter">${ICONS.trash}</button>
+    </div>`).join('');
+  return `${rows}
+    <button type="button" class="btn btn-ghost btn-small" onclick="addPendingCounter()">${ICONS.plus} Add counter</button>`;
+}
+function refreshCountersConfig(){
+  const el = document.getElementById('pf-counters');
+  if(el) el.innerHTML = buildCountersConfigHTML();
+}
+function addPendingCounter(){
+  pendingProjectCounters.push({ id: uid(), name:'', value:0, repeat:null });
+  refreshCountersConfig();
+}
+function removePendingCounter(i){
+  pendingProjectCounters.splice(i,1);
+  refreshCountersConfig();
+}
+function updatePendingCounter(i, field, val){
+  const c = pendingProjectCounters[i];
+  if(!c) return;
+  if(field==='name') c.name = val;
+  else if(field==='value') c.value = Math.max(0, Number(val)||0);
+  else if(field==='repeat') c.repeat = val==='' ? null : Math.max(0, Number(val)||0) || null;
+  // no re-render needed for text typing; repeat/value re-render not required either
+}
+
 function buildProjectPhotosHTML(){
   const thumbs = pendingProjectPhotos.map((url,i)=>`
     <div class="photo-thumb">
@@ -1776,13 +2025,17 @@ function buildYarnPickerHTML(){
       </div>
       <div style="display:flex; align-items:center; gap:14px; flex-wrap:wrap; margin-top:6px; padding-left:18px;">
         <label style="display:flex; align-items:center; gap:4px; font-size:0.72rem; color:var(--ink-soft);">
-          Need <input type="number" min="0" value="${required}" placeholder="0" style="width:60px;" onchange="updateProjectYarnRequired('${y.id}', this.value)" /> yd
+          Need <input type="number" min="0" value="${required===''?'':toDisplayLength(required)}" placeholder="0" style="width:60px;" onchange="updateProjectYarnRequired('${y.id}', this.value)" /> ${unitLabel()}
         </label>
         <label style="display:flex; align-items:center; gap:4px; font-size:0.72rem; color:var(--ink-soft);">
-          Used <input type="number" min="0" value="${used}" style="width:60px;" onchange="updateProjectYarnUsage('${y.id}', this.value)" /> yd
+          Used <input type="number" min="0" step="any" value="${toDisplayLength(used)}" style="width:60px;" id="usedin-${y.id}" onchange="updateProjectYarnUsageModal('${y.id}')" />
+          <select id="usedmode-${y.id}" style="font-size:0.7rem; padding:2px 4px;" onchange="onUsedModeChange('${y.id}')">
+            <option value="len" selected>${unitLabel()}</option>
+            ${(Number(y.skeinYardage)>0 && Number(y.skeinWeightGrams)>0) ? `<option value="skeins">skeins</option><option value="grams">g</option>` : ''}
+          </select>
         </label>
-        <span class="note" style="font-size:0.7rem; white-space:nowrap;">${remaining} yd in stash</span>
-        ${shortfall>0 ? `<span class="note" style="font-size:0.7rem; color:var(--wine); white-space:nowrap;">short ${Math.round(shortfall)} yd</span>` : (reqNum>0 ? `<span class="note" style="font-size:0.7rem; color:var(--forest);">enough</span>` : '')}
+        <span class="note" style="font-size:0.7rem; white-space:nowrap;">${toDisplayLength(remaining)} ${unitLabel()} in stash</span>
+        ${shortfall>0 ? `<span class="note" style="font-size:0.7rem; color:var(--wine); white-space:nowrap;">short ${toDisplayLength(shortfall)} ${unitLabel()}</span>` : (reqNum>0 ? `<span class="note" style="font-size:0.7rem; color:var(--forest);">enough</span>` : '')}
       </div>
     </div>`;
   }).join('');
@@ -1839,8 +2092,10 @@ function applyPaletteToProject(paletteId){
    linked yarn deducts only the *change* from last time from that yarn's
    yardageRemaining, so re-editing the number as a project progresses
    (rather than only recording a final total) keeps the stash accurate. */
-function updateProjectYarnUsage(yarnId, val){
-  const newVal = Math.max(0, Number(val) || 0);
+/* Core: set a yarn's used-yardage for this project, given a CANONICAL YARDS
+   value. Adjusts stash remaining by the delta. */
+function setProjectYarnUsageYards(yarnId, yardsUsed){
+  const newVal = Math.max(0, Math.round(yardsUsed)||0);
   const entry = pendingProjectYarnUsage.find(u=>u.yarnId===yarnId);
   const prevVal = entry ? entry.yardageUsed : 0;
   const delta = newVal - prevVal;
@@ -1850,10 +2105,41 @@ function updateProjectYarnUsage(yarnId, val){
   persist();
   refreshYarnPicker();
 }
+/* Kept for compatibility: interpret a plain length-unit input. */
+function updateProjectYarnUsage(yarnId, val){
+  setProjectYarnUsageYards(yarnId, fromInputLength(val));
+}
+/* Reads the Used field + its input-mode selector, converts to canonical
+   yards using the yarn's skein specs when mode is skeins/grams, and applies.
+   skeins→yards = skeins × yardsPerSkein; grams→yards = (grams/gramsPerSkein) × yardsPerSkein. */
+function updateProjectYarnUsageModal(yarnId){
+  const numEl = document.getElementById('usedin-'+yarnId);
+  const modeEl = document.getElementById('usedmode-'+yarnId);
+  if(!numEl) return;
+  const n = Number(numEl.value)||0;
+  const mode = modeEl ? modeEl.value : 'len';
+  const y = STATE.yarns.find(yy=>yy.id===yarnId);
+  let yards;
+  if(mode==='skeins' && y && Number(y.skeinYardage)>0){
+    yards = n * Number(y.skeinYardage);
+  } else if(mode==='grams' && y && Number(y.skeinWeightGrams)>0 && Number(y.skeinYardage)>0){
+    yards = (n / Number(y.skeinWeightGrams)) * Number(y.skeinYardage);
+  } else {
+    yards = fromInputLength(n);   // length mode (yd or m per preference)
+  }
+  setProjectYarnUsageYards(yarnId, yards);
+}
+/* Switching input mode: clear the number so a value typed as one unit isn't
+   re-read as another, and show the equivalent in the new mode is left blank
+   for the user to re-enter. Doesn't change stored usage until they type. */
+function onUsedModeChange(yarnId){
+  const numEl = document.getElementById('usedin-'+yarnId);
+  if(numEl){ numEl.value=''; numEl.focus(); }
+}
 /* Per-yarn "need" for this project — pure requirement, doesn't touch stock.
    Editing it just re-renders so the per-yarn shortfall updates live. */
 function updateProjectYarnRequired(yarnId, val){
-  const newVal = val==='' ? '' : Math.max(0, Number(val)||0);
+  const newVal = val==='' ? '' : Math.max(0, fromInputLength(val));
   const entry = pendingProjectYarnRequired.find(u=>u.yarnId===yarnId);
   if(entry) entry.yardage = newVal;
   else pendingProjectYarnRequired.push({ yarnId, yardage: newVal });
@@ -1930,6 +2216,11 @@ function renderProjectForm(){
     <div class="span2">
       <span class="note field-label">Photos (up to 3) — shown on the Showcase tab once this project is Finished</span>
       <div id="pf-photos">${buildProjectPhotosHTML()}</div>
+    </div>
+
+    <div class="span2">
+      <span class="note field-label">Row counters — add named counters (rows, repeats, pattern sections). Tap +/− from the project list while you work.</span>
+      <div id="pf-counters">${buildCountersConfigHTML()}</div>
     </div>
 
     <div class="span2">
@@ -2039,6 +2330,7 @@ function handleSaveProject(e){
     yarnUsage: pendingProjectYarnUsage.map(u=>({...u})),
     yarnRequired: pendingProjectYarnRequired.map(u=>({...u})),
     photos: [...pendingProjectPhotos],
+    counters: pendingProjectCounters.map(c=>({...c})),
     links: pendingProjectLinks.map(l=>({ id:l.id, url:l.url, type:l.type, title:l.title, thumbnail:l.thumbnail }))
   };
   if(existing){
@@ -2052,6 +2344,7 @@ function handleSaveProject(e){
   pendingProjectYarnUsage = [];
   pendingProjectYarnRequired = [];
   pendingProjectPhotos = [];
+  pendingProjectCounters = [];
   renderTab();
 }
 
@@ -2076,11 +2369,19 @@ function renderProjectRow(p){
   const garmentBadge = (p.garmentSize || p.garmentGender) ? [p.garmentGender, p.garmentSize].filter(Boolean).join(' · ') : null;
   const attachedPalette = p.paletteId ? STATE.paletteSavedPalettes.find(pp=>pp.id===p.paletteId) : null;
   const gapInfo = projectYardageGap(p);
-  const gapBadge = gapInfo && gapInfo.gap>0 ? `<span class="note danger-text">need ${Math.round(gapInfo.gap)} yd</span>` : (gapInfo ? `<span class="note" style="color:var(--forest);">enough on hand</span>` : '');
+  const gapBadge = gapInfo && gapInfo.gap>0 ? `<span class="note danger-text">need ${toDisplayLength(gapInfo.gap)} ${unitLabel()}</span>` : (gapInfo ? `<span class="note" style="color:var(--forest);">enough on hand</span>` : '');
   const linkStrip = (p.links||[]).length ? `<div class="link-strip">${p.links.map(l => l.thumbnail
       ? `<a class="link-card" href="${esc(l.url)}" target="_blank" rel="noopener"><img src="${esc(l.thumbnail)}" alt=""/><span class="link-title">${esc(l.title)}</span></a>`
       : `<a class="link-card generic" href="${esc(l.url)}" target="_blank" rel="noopener">${ICONS.link}<span class="link-title">${esc(l.title)}</span></a>`
     ).join('')}</div>` : '';
+  const counters = p.counters || [];
+  const expanded = STATE.expandedCounters === p.id;
+  const counterToggle = counters.length
+    ? `<button class="del-btn" onclick="toggleCounterPanel('${p.id}')" aria-label="Counters" title="Row counters">${ICONS.clipboard}</button>`
+    : '';
+  const counterPanel = (counters.length && expanded)
+    ? `<div class="counter-panel">${counters.map(c=>renderCounter(p.id, c)).join('')}</div>`
+    : '';
   return `<div class="project-row">
     <span class="status-dot" style="background:${STATUS_COLORS[p.status]}"></span>
     <div class="grow">
@@ -2090,17 +2391,57 @@ function renderProjectRow(p){
         ${garmentBadge ? `<span class="note">${esc(garmentBadge)}</span>` : ''}
         ${attachedPalette ? `<span class="note">${ICONS.palette} ${esc(attachedPalette.name)}</span>` : ''}
         ${gapBadge}
+        ${counters.length ? `<span class="note">${counters.length} counter${counters.length===1?'':'s'}</span>` : ''}
         ${daysActive!=null ? `<span class="days">${daysActive}d in progress</span>` : ''}
       </div>
       ${linkStrip}
+      ${counterPanel}
     </div>
     <select class="status-select" onchange="updateProjectStatus('${p.id}', this.value)">
       ${STATUSES.map(s=>`<option ${s===p.status?'selected':''}>${s}</option>`).join('')}
     </select>
+    ${counterToggle}
     ${gapInfo && gapInfo.gap>0 ? `<button class="del-btn" onclick="shopProjectGap('${p.id}')" aria-label="Add gap to shopping list" title="Add the ${Math.round(gapInfo.gap)} yd gap to your shopping list">${ICONS.cart}</button>` : ''}
     <button class="del-btn" onclick="showProjectForm('${p.id}')" aria-label="Edit project">${ICONS.pencil}</button>
     <button class="del-btn" onclick="deleteProject('${p.id}')" aria-label="Delete project">${ICONS.trash}</button>
   </div>`;
+}
+/* --- Row counters (used from the project row; configured in the edit form) --- */
+function renderCounter(projectId, c){
+  const atRepeat = c.repeat && c.value>0 && c.value % c.repeat === 0;
+  const repeatInfo = c.repeat
+    ? `<span class="note" style="font-size:0.68rem;">${atRepeat?'↺ repeat!':'every '+c.repeat}</span>`
+    : '';
+  return `<div class="counter-row">
+    <span class="counter-name">${esc(c.name||'Counter')}</span>
+    <button class="counter-btn" onclick="adjustCounter('${projectId}','${c.id}',-1)" aria-label="Decrease">−</button>
+    <span class="counter-value ${atRepeat?'at-repeat':''}">${c.value||0}</span>
+    <button class="counter-btn" onclick="adjustCounter('${projectId}','${c.id}',1)" aria-label="Increase">+</button>
+    ${repeatInfo}
+    <button class="counter-btn subtle" onclick="resetCounter('${projectId}','${c.id}')" aria-label="Reset" title="Reset to 0">↺</button>
+  </div>`;
+}
+function toggleCounterPanel(projectId){
+  STATE.expandedCounters = STATE.expandedCounters===projectId ? null : projectId;
+  renderTab();
+}
+function adjustCounter(projectId, counterId, delta){
+  const p = STATE.projects.find(pp=>pp.id===projectId);
+  if(!p || !p.counters) return;
+  const c = p.counters.find(cc=>cc.id===counterId);
+  if(!c) return;
+  c.value = Math.max(0, (Number(c.value)||0) + delta);
+  persistSoon();                 // deferred save (10s checkpoint + flush-on-exit)
+  // Update just this counter's number in place to stay responsive under rapid taps.
+  renderTab();
+}
+function resetCounter(projectId, counterId){
+  const p = STATE.projects.find(pp=>pp.id===projectId);
+  const c = p && p.counters && p.counters.find(cc=>cc.id===counterId);
+  if(!c) return;
+  c.value = 0;
+  persistSoon();
+  renderTab();
 }
 /* Push a project's yardage gap onto the shopping list. Records the source
    (this project) for future dedup, but the shopping list shows it cleanly. */
@@ -2555,7 +2896,7 @@ function renderShowcaseCard(p){
    decision, the retailer owns product discovery.
 ================================================================= */
 function shoppingSearchQuery(item){
-  return [item.colorName, item.weight, item.fiber, item.yardage ? ('~'+item.yardage+' yards') : '', 'yarn']
+  return [item.colorName, item.weight, item.fiber, item.yardage ? ('~'+toDisplayLength(item.yardage)+(STATE.unitPref==='m'?' meters':' yards')) : '', 'yarn']
     .filter(Boolean).join(' ');
 }
 function googleSearchUrl(item){
@@ -2623,7 +2964,7 @@ function submitShoppingForm(e){
     colorName: document.getElementById('sf-color').value.trim()||null,
     weight: document.getElementById('sf-weight').value||null,
     fiber: document.getElementById('sf-fiber').value.trim()||null,
-    yardage: document.getElementById('sf-yardage').value===''?null:Number(document.getElementById('sf-yardage').value),
+    yardage: document.getElementById('sf-yardage').value===''?null:fromInputLength(document.getElementById('sf-yardage').value),
     quantity: Number(document.getElementById('sf-qty').value)||1
   };
   if(STATE.editingShoppingId){
@@ -2651,8 +2992,8 @@ function renderShoppingForm(){
     <label class="field">Fiber (optional)
       <input id="sf-fiber" placeholder="e.g. wool" value="${esc(v('fiber'))}" />
     </label>
-    <label class="field">Yardage needed (optional)
-      <input id="sf-yardage" type="number" min="0" placeholder="e.g. 220" value="${esc(v('yardage'))}" />
+    <label class="field">Length needed (${unitLabel()}, optional)
+      <input id="sf-yardage" type="number" min="0" placeholder="e.g. 220" value="${v('yardage')===''||v('yardage')==null?'':toDisplayLength(v('yardage'))}" />
     </label>
     <label class="field">Quantity (skeins)
       <input id="sf-qty" type="number" min="1" value="${editing?esc(editing.quantity):1}" />
@@ -2821,7 +3162,7 @@ function renderShoppingGroup(group){
   const rep = group[0]; // representative for spec + search links
   const done = rep.done;
   const totalQty = group.reduce((s,i)=>s+(Number(i.quantity)||1),0);
-  const spec = [rep.colorName, rep.weight, rep.fiber, rep.yardage?('~'+rep.yardage+' yd'):''].filter(Boolean).join(' · ') || 'Yarn';
+  const spec = [rep.colorName, rep.weight, rep.fiber, rep.yardage?('~'+toDisplayLength(rep.yardage)+' '+unitLabel()):''].filter(Boolean).join(' · ') || 'Yarn';
   const sources = group.filter(i=>i.sourceType!=='manual' && i.sourceName).map(i=>i.sourceName);
   const uniqueSources = [...new Set(sources)];
   const srcLine = uniqueSources.length ? `<p class="note" style="margin:2px 0 0;">for: ${uniqueSources.map(esc).join(', ')}</p>` : '';
@@ -2964,6 +3305,7 @@ function initApp(){
         STATE.projects = (data && data.projects) || [];
         STATE.paletteSavedPalettes = (data && data.palettes) || [];
         STATE.shoppingList = (data && data.shoppingList) || [];
+        STATE.unitPref = (data && data.prefs && data.prefs.unitPref) || 'yd';
       }catch(e){
         console.error('Could not load your data', e);
         STATE.yarns = [];

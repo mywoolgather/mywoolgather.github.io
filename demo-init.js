@@ -91,7 +91,9 @@
       // for the session without any storage backend.
       return URL.createObjectURL(blob);
     },
-    async deletePhoto(){ return; }
+    async deletePhoto(){ return; },
+    async deleteAccount(){ return; },        // no-op in demo
+    async sendSupport(){ return; }
   };
 
   // Signal readiness exactly like firebase-init.js does.
