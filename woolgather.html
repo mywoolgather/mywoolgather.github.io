@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Woolgather — a stash &amp; project ledger</title>
+
+<!-- ===== PWA / installability ===== -->
+<link rel="manifest" href="/manifest.webmanifest" />
+<meta name="theme-color" content="#5C3A72" />
+<link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png" />
+<!-- iOS: no manifest icon support, needs its own apple-touch-icon + web-app tags -->
+<link rel="apple-touch-icon" href="/icons/icon-180.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="default" />
+<meta name="apple-mobile-web-app-title" content="Woolgather" />
+<meta name="mobile-web-app-capable" content="yes" />
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@600;700&family=Work+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+
+<script type="module" src="firebase-init.js"></script>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<div id="app"></div>
+<div id="wg-modal-root"></div>
+<div id="wg-toast-root" class="wg-toast-wrap"></div>
+<script src="app.js"></script>
+</body>
+</html>
