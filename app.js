@@ -115,6 +115,8 @@ let STATE = {
   editingShoppingId: null,
   authMode: 'signin',
   unitPref: 'yd',   // 'yd' | 'm' — display/input unit; storage is always yards
+  theme: 'device', // 'light' | 'dark' | 'device'
+  preferencesSetup: false,
   expandedCounters: null,   // project id whose counter panel is open
   stashSearch: '',
   stashFilterWeight: 'All weights',
@@ -150,12 +152,29 @@ let statusChartInstance = null;
 async function persist(){
   if(!STATE.user) return;
   try{
-    await window.FB.saveUserData(STATE.user.uid, { yarns: STATE.yarns, projects: STATE.projects, palettes: STATE.paletteSavedPalettes, shoppingList: STATE.shoppingList, prefs: { unitPref: STATE.unitPref } });
+    await window.FB.saveUserData(STATE.user.uid, { yarns: STATE.yarns, projects: STATE.projects, palettes: STATE.paletteSavedPalettes, shoppingList: STATE.shoppingList, prefs: {unitPref: STATE.unitPref, theme: STATE.theme,   preferencesSetup: true} });
   }catch(e){
     console.error('Save failed', e);
     wgToast("Couldn't save to your account — check your connection and try again.", "error");
   }
 }
+/* Theme — resolves 'device' to the OS preference, applies via a data-theme
+   attribute + color-scheme so the browser renders form controls correctly. */
+function getResolvedTheme(){
+  if(STATE.theme === 'dark') return 'dark';
+  if(STATE.theme === 'light') return 'light';
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+function applyTheme(){
+  const theme = getResolvedTheme();
+  document.documentElement.dataset.theme = theme;
+  document.documentElement.style.colorScheme = theme;
+}
+// When set to 'device', follow live OS theme changes.
+const themeMedia = window.matchMedia('(prefers-color-scheme: dark)');
+themeMedia.addEventListener?.('change', () => {
+  if(STATE.theme === 'device') applyTheme();
+});
 /* Deferred save for high-frequency edits (row counters). Increments update
    in-memory immediately; the write is deferred to a 10-second safety
    checkpoint, and flushed immediately when the page is hidden/closed — so a
@@ -863,6 +882,14 @@ function renderSettingsSheet(){
             <button class="harmony-btn ${STATE.unitPref==='m'?'active':''}" onclick="setUnitPref('m')">Meters</button>
           </div>
         </div>
+        <div style="padding:0 22px 12px;">
+          <span class="note" style="display:block; margin-bottom:6px;">Appearance</span>
+          <div style="display:flex; gap:6px;">
+            <button class="harmony-btn ${STATE.theme==='light'?'active':''}" onclick="setTheme('light')">Light</button>
+            <button class="harmony-btn ${STATE.theme==='dark'?'active':''}" onclick="setTheme('dark')">Dark</button>
+            <button class="harmony-btn ${STATE.theme==='device'?'active':''}" onclick="setTheme('device')">Device</button>
+          </div>
+        </div>
         <button onclick="window.FB.signOutUser()">${ICONS.reset}<span>Sign out</span></button>
         <button onclick="closeSettings(); resetAll();" class="danger-text">${ICONS.trash}<span>Clear my data</span></button>
         <div class="sheet-divider"></div>
@@ -877,6 +904,83 @@ function setUnitPref(u){
   renderSettingsSheet();  // refresh the toggle's active state
   renderTab();            // re-render current tab with new units
 }
+function setTheme(theme){
+  STATE.theme = theme;
+  applyTheme();
+  persist();
+  renderSettingsSheet();
+}
+
+function completePreferencesSetup(){
+  STATE.preferencesSetup = true;
+  persist();
+  closePreferencesSetup();
+}
+
+function closePreferencesSetup(){
+  const modal = document.getElementById('preferences-setup');
+  if(modal) modal.remove();
+}
+
+function showPreferencesSetup(){
+  let modal = document.getElementById('preferences-setup');
+  if(!modal){
+    modal = document.createElement('div');
+    modal.id = 'preferences-setup';
+    modal.className = 'sheet-backdrop open';
+    document.body.appendChild(modal);
+  }
+  modal.innerHTML = buildPreferencesSetupHTML();
+}
+function buildPreferencesSetupHTML(){
+  return `
+    <div class="sheet preferences-setup-modal">
+      <div class="sheet-head">
+        <div>
+          <div class="sheet-title">Make WoolGather yours</div>
+          <div class="sheet-sub">Choose your preferences. You can change these anytime in Settings.</div>
+        </div>
+      </div>
+
+      <div class="preferences-setup-body">
+        <div class="preferences-group">
+          <span class="note">Length unit</span>
+          <div class="preferences-options">
+            <button class="harmony-btn ${STATE.unitPref === 'yd' ? 'active' : ''}"
+              onclick="setSetupPref('unit','yd')">Yards</button>
+            <button class="harmony-btn ${STATE.unitPref === 'm' ? 'active' : ''}"
+              onclick="setSetupPref('unit','m')">Meters</button>
+          </div>
+        </div>
+
+        <div class="preferences-group">
+          <span class="note">Appearance</span>
+          <div class="preferences-options">
+            <button class="harmony-btn ${STATE.theme === 'light' ? 'active' : ''}"
+              onclick="setSetupPref('theme','light')">Light</button>
+            <button class="harmony-btn ${STATE.theme === 'dark' ? 'active' : ''}"
+              onclick="setSetupPref('theme','dark')">Dark</button>
+            <button class="harmony-btn ${STATE.theme === 'device' ? 'active' : ''}"
+              onclick="setSetupPref('theme','device')">Device</button>
+          </div>
+        </div>
+
+        <button class="preferences-save" onclick="completePreferencesSetup()">
+          Save preferences
+        </button>
+      </div>
+    </div>`;
+}
+/* Sets a preference from the setup modal and refreshes just the modal's
+   contents in place (so the active highlight moves) — the old code re-called
+   the open function, which early-returned and left the buttons feeling dead. */
+function setSetupPref(kind, val){
+  if(kind==='unit') STATE.unitPref = val;
+  else if(kind==='theme'){ STATE.theme = val; applyTheme(); }
+  const modal = document.getElementById('preferences-setup');
+  if(modal) modal.innerHTML = buildPreferencesSetupHTML();
+}
+
 /* Delete account — deliberately steers toward the less-drastic "Clear all
    data" first, then requires an explicit irreversible confirmation, then
    tears down Firestore data, Storage photos, and the Auth user itself. */
@@ -3295,32 +3399,55 @@ function initApp(){
   window.addEventListener('offline', syncOnline);
 
   window.FB.onAuthChange(async (user) => {
-    STATE.authChecked = true;
-    STATE.user = user || null;
+  STATE.authChecked = true;
+  STATE.user = user || null;
 
-    if(user){
-      try{
-        const data = await window.FB.loadUserData(user.uid);
-        STATE.yarns = (data && data.yarns) || [];
-        STATE.projects = (data && data.projects) || [];
-        STATE.paletteSavedPalettes = (data && data.palettes) || [];
-        STATE.shoppingList = (data && data.shoppingList) || [];
-        STATE.unitPref = (data && data.prefs && data.prefs.unitPref) || 'yd';
-      }catch(e){
-        console.error('Could not load your data', e);
-        STATE.yarns = [];
-        STATE.projects = [];
-      }
-      await loadPresetsFromFirestore();
-    } else {
+  if(user){
+    try{
+      const data = await window.FB.loadUserData(user.uid);
+
+      STATE.yarns = (data && data.yarns) || [];
+      STATE.projects = (data && data.projects) || [];
+      STATE.paletteSavedPalettes = (data && data.palettes) || [];
+      STATE.shoppingList = (data && data.shoppingList) || [];
+
+      STATE.unitPref =
+        (data && data.prefs && data.prefs.unitPref) || 'yd';
+
+      STATE.theme =
+        (data && data.prefs && data.prefs.theme) || 'device';
+
+      STATE.preferencesSetup =
+        data && data.prefs &&
+        data.prefs.preferencesSetup === true;
+
+      applyTheme();
+
+    }catch(e){
+      console.error('Could not load your data', e);
       STATE.yarns = [];
       STATE.projects = [];
     }
-    render();
-    maybeShowIosInstallHint();
-  });
-}
 
+    await loadPresetsFromFirestore();
+
+  }else{
+    STATE.yarns = [];
+    STATE.projects = [];
+  }
+
+  render();
+  maybeShowIosInstallHint();
+
+  // Show the preference setup for users who haven't completed it.
+  if(user && STATE.preferencesSetup !== true){
+    setTimeout(() => {
+      showPreferencesSetup();
+    }, 300);
+  }
+});
+
+}
 /* iOS Safari gives no install prompt — show a gentle, dismissible hint on
    how to Add to Home Screen. Only on iOS, only in a browser tab (not when
    already launched as an installed app), and only once (dismissal sticks
