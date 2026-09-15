@@ -2,7 +2,7 @@
   "name": "Woolgather",
   "short_name": "Woolgather",
   "description": "A quiet ledger for yarn, thread, and the projects they become.",
-  "start_url": "/woolgather.html",
+  "start_url": "/index.html",
   "scope": "/",
   "display": "standalone",
   "orientation": "any",

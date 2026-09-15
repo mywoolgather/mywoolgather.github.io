@@ -215,7 +215,32 @@
      unaffected. Mobile-only chrome is display:none by default
      and switched on inside the media query.
   ============================================================ */
-  .mobile-nav, .fab, .sheet-backdrop{ display:none; }
+  .mobile-nav, .fab{ display:none; }
+
+  /* Desktop Settings / More sheet: centered modal instead of a mobile-only
+     bottom sheet. Mobile keeps the slide-up sheet below. */
+  .sheet-backdrop{
+    display:flex; position:fixed; inset:0; z-index:50;
+    background:rgba(30,25,40,0.45); align-items:center; justify-content:center;
+    padding:20px; opacity:0; pointer-events:none; transition:opacity 0.2s;
+  }
+  .sheet-backdrop.open{ opacity:1; pointer-events:auto; }
+  .sheet{
+    width:100%; max-width:420px; background:var(--card);
+    border:1px solid var(--border); border-radius:14px;
+    padding:8px 0 14px; box-shadow:0 12px 40px rgba(0,0,0,0.25);
+    transform:translateY(8px); transition:transform 0.2s;
+  }
+  .sheet-backdrop.open .sheet{ transform:translateY(0); }
+  .sheet-handle{ display:none; }
+  .sheet button{
+    width:100%; background:none; border:none; text-align:left; cursor:pointer;
+    padding:14px 22px; font-family:inherit; font-size:0.95rem; color:var(--ink);
+    display:flex; align-items:center; gap:14px;
+  }
+  .sheet button.active{ color:var(--plum); font-weight:600; }
+  .sheet button .icon{ width:20px; height:20px; }
+  .sheet-divider{ height:1px; background:var(--border); margin:6px 22px; }
 
   @media (max-width:760px), (max-height:550px) and (max-width:950px){
     .wrap{ padding:16px max(20px, env(safe-area-inset-left)) 96px max(20px, env(safe-area-inset-right)); }  /* room for bottom nav; respect landscape notch/safe areas */
@@ -331,3 +356,16 @@
   .counter-btn{ width:34px; height:34px; border-radius:8px; border:1px solid var(--border); background:var(--card); color:var(--ink); font-size:1.1rem; line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; }
   .counter-btn:active{ background:var(--plum); color:#fff; }
   .counter-btn.subtle{ font-size:0.85rem; color:var(--ink-soft); }
+
+/* Settings unit toggle: override generic .sheet button styles */
+.sheet .harmony-btn {
+  width:auto;
+  padding:6px 12px;
+  font-size:0.75rem;
+  border-radius:999px;
+}
+.sheet .harmony-btn.active {
+  background:var(--plum);
+  border-color:var(--plum);
+  color:#fff;
+}
