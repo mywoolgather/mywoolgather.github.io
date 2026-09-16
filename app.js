@@ -3,7 +3,7 @@
 ================================================================= */
 const STATUS_COLORS = { Planned:'#6E6178', WIP:'#8B5FA3', Finished:'#3E6B49', Frogged:'#7A2F4B' };
 const CHART_COLORS = ['#3E6B49','#5C3A72','#9B7EC0','#8FAF7C','#6E6178'];
-const WEIGHTS = ["Lace","Fingering","Sport","DK","Worsted","Aran","Bulky","Super Bulky"];
+const WEIGHTS = ["Lace","Fingering","Sport","DK","Worsted","Bulky","Super Bulky"];
 /* Display metadata for weight categories — CYC number + common aliases so
    people whose brand uses a different term (8-ply, chunky, etc.) recognize
    it. Keys must match WEIGHTS exactly; internal values/order are unchanged
@@ -15,8 +15,7 @@ const WEIGHT_META = {
   "Fingering":   { cyc:1, aliases:["sock","4-ply","super fine","baby"] },
   "Sport":       { cyc:2, aliases:["5-ply","fine"] },
   "DK":          { cyc:3, aliases:["light worsted","8-ply","double knit"] },
-  "Worsted":     { cyc:4, aliases:["afghan","10-ply","medium"] },
-  "Aran":        { cyc:4, aliases:["heavy worsted","12-ply"] },
+  "Worsted":     { cyc:4, aliases:["aran","afghan","heavy worsted","10-ply","12-ply"] },
   "Bulky":       { cyc:5, aliases:["chunky","craft","14-ply"] },
   "Super Bulky": { cyc:6, aliases:["super chunky","roving"] }
 };
@@ -25,6 +24,16 @@ function weightLabel(name){
   if(!m) return name;
   const alias = m.aliases && m.aliases.length ? ` (${m.aliases.slice(0,2).join(', ')})` : '';
   return `${m.cyc} · ${name}${alias}`;
+}
+/* Migration: "Aran" used to be its own weight category, sitting between
+   Worsted and Bulky. Per standard weight-conversion references (UK Aran =
+   US Worsted = CYC 4), it's the same weight under a different regional
+   name, not a distinct level — so it's now folded into Worsted everywhere
+   (dropdown, matching, OCR). Any yarn saved with the old value is
+   normalized on load so it keeps matching and displaying correctly. */
+function normalizeLegacyYarn(y){
+  if(y && y.weightCategory === 'Aran') return { ...y, weightCategory: 'Worsted' };
+  return y;
 }
 const STATUSES = ["Planned","WIP","Finished","Frogged"];
 const GARMENT_SIZES = ["XS","S","M","L","XL","2X","3X","One size"];
@@ -74,7 +83,7 @@ let YARN_PRESETS = [
   { brand:"Cascade Yarns", line:"220 Superwash", fiber:"100% Superwash Wool", weightCategory:"Worsted", skeinWeightGrams:100, skeinYardage:220 },
   { brand:"Cascade Yarns", line:"Heritage", fiber:"75% Superwash Merino Wool, 25% Nylon", weightCategory:"Fingering", skeinWeightGrams:100, skeinYardage:437 },
   { brand:"Malabrigo", line:"Rios", fiber:"100% Superwash Merino Wool", weightCategory:"Worsted", skeinWeightGrams:100, skeinYardage:210 },
-  { brand:"Drops", line:"Nepal", fiber:"65% Wool, 35% Alpaca", weightCategory:"Aran", skeinWeightGrams:50, skeinYardage:82 },
+  { brand:"Drops", line:"Nepal", fiber:"65% Wool, 35% Alpaca", weightCategory:"Worsted", skeinWeightGrams:50, skeinYardage:82 },
   { brand:"Lion Brand", line:"Wool-Ease", fiber:"80% Acrylic, 20% Wool", weightCategory:"Worsted", skeinWeightGrams:85, skeinYardage:197 },
   { brand:"Lion Brand", line:"Wool-Ease Thick & Quick", fiber:"80% Acrylic, 20% Wool", weightCategory:"Super Bulky", skeinWeightGrams:170, skeinYardage:106 },
   { brand:"Lion Brand", line:"24/7 Cotton", fiber:"100% Mercerized Cotton", weightCategory:"Worsted", skeinWeightGrams:100, skeinYardage:186 },
@@ -665,8 +674,7 @@ function parseYarnLabel(rawText){
     'Fingering':['fingering','sock','4 ply','4-ply','super fine'],
     'Sport':['sport'],
     'DK':['dk','double knit','light worsted'],
-    'Worsted':['worsted','afghan','medium'],
-    'Aran':['aran','10 ply','10-ply'],
+    'Worsted':['worsted','afghan','medium','aran','10 ply','10-ply'],
     'Bulky':['bulky','chunky','12 ply'],
     'Super Bulky':['super bulky','super chunky','roving']
   };
@@ -1535,11 +1543,36 @@ function onLabelScanDrop(e){
   const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
   processLabelScan(file);
 }
+/* Tesseract.js is loaded lazily, on first actual use, rather than as a
+   blocking <script> tag on every page load — it's a large library only
+   needed by the rare "scan a label" flow, and blocking the whole app's
+   first paint on it for every visitor was the single biggest contributor
+   to slow first loads. Cached by the browser/SW after the first load. */
+let _tesseractLoading = null;
+function ensureTesseractLoaded(){
+  if(typeof Tesseract !== 'undefined') return Promise.resolve();
+  if(_tesseractLoading) return _tesseractLoading;
+  _tesseractLoading = new Promise((resolve, reject)=>{
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
+    s.onload = () => resolve();
+    s.onerror = () => { _tesseractLoading = null; reject(new Error('load failed')); };
+    document.head.appendChild(s);
+  });
+  return _tesseractLoading;
+}
 async function processLabelScan(file){
   if(!file || !isAcceptableImageFile(file)) return;
-  if(typeof Tesseract === 'undefined'){ wgToast("Couldn't load the label reader — check your connection and try again.", "error"); return; }
   const statusEl = document.getElementById('yf-ocr-status');
   const setStatus = (t)=>{ if(statusEl){ statusEl.style.display='inline'; statusEl.textContent=t; } };
+  setStatus('Loading label reader…');
+  try{
+    await ensureTesseractLoaded();
+  }catch(e){
+    setStatus('');
+    wgToast("Couldn't load the label reader — check your connection and try again.", "error");
+    return;
+  }
   setStatus('Reading label…');
   try{
     const usable = await toRenderableImageBlob(file);
@@ -3406,7 +3439,7 @@ function initApp(){
     try{
       const data = await window.FB.loadUserData(user.uid);
 
-      STATE.yarns = (data && data.yarns) || [];
+      STATE.yarns = ((data && data.yarns) || []).map(normalizeLegacyYarn);
       STATE.projects = (data && data.projects) || [];
       STATE.paletteSavedPalettes = (data && data.palettes) || [];
       STATE.shoppingList = (data && data.shoppingList) || [];
