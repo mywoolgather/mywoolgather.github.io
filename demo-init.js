@@ -13,6 +13,35 @@
     providerData: [{ providerId: 'password' }]
   };
 
+  // ---- Showcase photo stand-ins -------------------------------------
+  // Real photography can't ship in seed data (nothing to link to, and it
+  // would look like a stock photo dropped into someone's ledger). Instead
+  // we generate a small abstract "swatch" per finished project from the
+  // actual yarn colors used, so the Showcase tab reads as a real gallery
+  // instead of a wall of "No photo yet" placeholders.
+  function mkSwatch(colors){
+    const c = colors && colors.length ? colors : ['#c9c2d6','#efe7d3'];
+    const c1 = c[0], c2 = c[1] || c[0];
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400">
+      <defs>
+        <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="${c1}"/>
+          <stop offset="1" stop-color="${c2}"/>
+        </linearGradient>
+      </defs>
+      <rect width="400" height="400" fill="url(#g)"/>
+      ${Array.from({length:7}).map((_,i)=>{
+        const y = -40 + i*60;
+        return `<path d="M -20 ${y} Q 200 ${y+40} 420 ${y}" stroke="#ffffff" stroke-opacity="0.16" stroke-width="14" fill="none"/>`;
+      }).join('')}
+      ${Array.from({length:7}).map((_,i)=>{
+        const y = -10 + i*60;
+        return `<path d="M -20 ${y} Q 200 ${y-40} 420 ${y}" stroke="#000000" stroke-opacity="0.06" stroke-width="10" fill="none"/>`;
+      }).join('')}
+    </svg>`;
+    return 'data:image/svg+xml;base64,' + btoa(svg);
+  }
+
   // ---- Seed data: a realistic, filled-out stash / projects / palettes ----
   const seed = {
     yarns: [
@@ -31,9 +60,12 @@
     ],
     projects: [
       { id:'p1', name:"Teal Winter Cowl", patternName:'Cabled Cowl', status:'WIP', startDate:'2026-01-25', finishDate:null, garmentSize:'One size', garmentGender:'Unisex', paletteId:null, yarnIds:['y5'], yarnUsage:[{yarnId:'y5', yardageUsed:0}], yarnRequired:[{yarnId:'y5', yardage:400}], photos:[], links:[{ id:'l1', url:'https://www.youtube.com/watch?v=dQw4w9WgXcQ', type:'youtube', title:'How to Cable Without a Cable Needle', thumbnail:null }], createdAt:'2026-01-25' },
-      { id:'p2', name:"Mom's Garden Shawl", patternName:'Gardenia Shawl', status:'Finished', startDate:'2025-11-01', finishDate:'2025-12-20', garmentSize:'One size', garmentGender:"Women's", paletteId:'pal1', yarnIds:['y3','y4'], yarnUsage:[{yarnId:'y3', yardageUsed:520},{yarnId:'y4', yardageUsed:180}], yarnRequired:[{yarnId:'y3', yardage:520},{yarnId:'y4', yardage:180}], photos:[], links:[], createdAt:'2025-11-01' },
+      { id:'p2', name:"Mom's Garden Shawl", patternName:'Gardenia Shawl', status:'Finished', startDate:'2025-11-01', finishDate:'2025-12-20', garmentSize:'One size', garmentGender:"Women's", paletteId:'pal1', yarnIds:['y3','y4'], yarnUsage:[{yarnId:'y3', yardageUsed:520},{yarnId:'y4', yardageUsed:180}], yarnRequired:[{yarnId:'y3', yardage:520},{yarnId:'y4', yardage:180}], photos:[mkSwatch(['#3e6b49','#efe7d3'])], links:[], createdAt:'2025-11-01' },
       { id:'p3', name:"Dad's Sweater", patternName:'Nordic Nights Pullover', status:'Planned', startDate:'2026-02-10', finishDate:null, garmentSize:'XL', garmentGender:"Men's", paletteId:null, yarnIds:['y1','y8'], yarnUsage:[], yarnRequired:[{yarnId:'y1', yardage:1500},{yarnId:'y8', yardage:400}], photos:[], links:[], createdAt:'2026-02-10' },
-      { id:'p4', name:'Speckled Market Bag', patternName:'Summer Net Bag', status:'WIP', startDate:'2026-02-05', finishDate:null, garmentSize:null, garmentGender:null, paletteId:null, yarnIds:['y7'], yarnUsage:[{yarnId:'y7', yardageUsed:120}], yarnRequired:[{yarnId:'y7', yardage:300}], photos:[], links:[], createdAt:'2026-02-05' }
+      { id:'p4', name:'Speckled Market Bag', patternName:'Summer Net Bag', status:'WIP', startDate:'2026-02-05', finishDate:null, garmentSize:null, garmentGender:null, paletteId:null, yarnIds:['y7'], yarnUsage:[{yarnId:'y7', yardageUsed:120}], yarnRequired:[{yarnId:'y7', yardage:300}], photos:[], links:[], createdAt:'2026-02-05' },
+      { id:'p5', name:'Charcoal Slouch Beanie', patternName:'Weekend Slouch Hat', status:'Finished', startDate:'2025-11-10', finishDate:'2025-11-24', garmentSize:'One size', garmentGender:'Unisex', paletteId:null, yarnIds:['y1'], yarnUsage:[{yarnId:'y1', yardageUsed:210}], yarnRequired:[{yarnId:'y1', yardage:210}], photos:[mkSwatch(['#3a3a3d','#5c5c61'])], links:[], createdAt:'2025-11-10' },
+      { id:'p6', name:'Dusty Rose Baby Cardigan', patternName:'Little Petal Cardigan', status:'Finished', startDate:'2026-02-12', finishDate:'2026-03-01', garmentSize:'6-12 months', garmentGender:"Baby", paletteId:null, yarnIds:['y11'], yarnUsage:[{yarnId:'y11', yardageUsed:260}], yarnRequired:[{yarnId:'y11', yardage:260}], photos:[mkSwatch(['#c98b95','#efe7d3'])], links:[], createdAt:'2026-02-12' },
+      { id:'p7', name:'Mustard Mittens', patternName:'Fireside Mittens', status:'Finished', startDate:'2025-10-02', finishDate:'2025-10-19', garmentSize:'Adult M', garmentGender:'Unisex', paletteId:'pal2', yarnIds:['y6'], yarnUsage:[{yarnId:'y6', yardageUsed:180}], yarnRequired:[{yarnId:'y6', yardage:180}], photos:[mkSwatch(['#c6932f','#3c7a72'])], links:[], createdAt:'2025-10-02' }
     ],
     palettes: [
       { id:'pal1', name:'Garden Complementary', harmony:'Complementary', matchMode:'balanced', baseYarnId:'y3', slots:[{ role:'Complement', yarnId:'y2', hex:'#a8342e', closeness:74 }], createdAt:'2025-11-01' },
@@ -41,7 +73,7 @@
     ],
     shoppingList: [
       { id:'s1', colorName:'Sage green', hex:'#8faf7c', weight:'Worsted', fiber:'wool', yardage:200, quantity:2, note:'Complementary palette', sourceType:'palette', sourceId:'pal2', sourceName:'Autumn Triad palette', done:false, createdAt:'2026-02-09' },
-      { id:'s2', colorName:null, hex:null, weight:'Worsted', fiber:null, yardage:600, quantity:1, note:'Project gap', sourceType:'project', sourceId:'p3', sourceName:"Dad's Sweater", done:false, createdAt:'2026-02-10' }
+      { id:'s2', colorName:'Charcoal 900', hex:'#3a3a3d', weight:'Worsted', fiber:'100% Peruvian Highland Wool', yardage:600, quantity:1, note:'Project gap — Dad\'s Sweater needs more Charcoal 900 to finish the body', sourceType:'project', sourceId:'p3', sourceName:"Dad's Sweater", done:false, createdAt:'2026-02-10' }
     ]
   };
 
@@ -108,7 +140,7 @@
     bar.setAttribute('role','note');
     bar.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:100;background:#5C3A72;color:#fff;text-align:center;font-family:\'Work Sans\',sans-serif;font-size:0.82rem;padding:8px 14px;display:flex;align-items:center;justify-content:center;gap:12px;flex-wrap:wrap;box-shadow:0 2px 8px rgba(0,0,0,0.2);';
     bar.innerHTML = '<span><strong>Live demo</strong> — sample data, nothing saves. Explore every feature freely.</span>'
-      + '<a href="'+window.WG_SIGNUP_URL+'" style="background:#fff;color:#5C3A72;text-decoration:none;font-weight:600;border-radius:6px;padding:4px 12px;white-space:nowrap;">Sign up free →</a>';
+      + '<a href="'+window.WG_SIGNUP_URL+'" style="background:#fff;color:#5C3A72;text-decoration:none;font-weight:600;border-radius:6px;padding:4px 12px;white-space:nowrap;">Create your gathering</a>';
     document.body.appendChild(bar);
     // Push app content down so the banner never covers the header.
     const wrapFix = document.createElement('style');
