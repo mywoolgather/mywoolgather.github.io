@@ -111,6 +111,7 @@
   .yarn-swatch-name{ display:flex; align-items:center; gap:10px; min-width:0; }
   .swatch{ width:28px; height:28px; border-radius:50%; flex-shrink:0; border:1px solid var(--border); }
   .yarn-name{ font-family:'Fraunces',serif; font-weight:600; margin:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .scrap-badge{ font-family:'Work Sans',sans-serif; font-size:0.6rem; font-weight:600; text-transform:uppercase; letter-spacing:0.04em; background:var(--sage,#8FAF7C); color:#fff; border-radius:4px; padding:1px 5px; vertical-align:middle; }
   .yarn-sub{ font-size:0.75rem; color:var(--ink-soft); margin:1px 0 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .del-btn{ background:none; border:none; color:var(--ink-soft); cursor:pointer; padding:2px; }
   .del-btn:hover{ color:var(--wine); }

@@ -129,6 +129,13 @@
   };
 
   // Signal readiness exactly like firebase-init.js does.
+  // Tip-jar links for the demo (same as the live app — safe to show on a
+  // portfolio). Fill in your real funding URLs.
+  window.WG_TIP_LINKS = [
+    // { label: 'Buy me a coffee ☕', url: 'https://buymeacoffee.com/yourname' },
+    // { label: 'Tip on Ko-fi', url: 'https://ko-fi.com/yourname' },
+  ];
+
   window.dispatchEvent(new Event('firebase-ready'));
 
   // Where the "Sign up" / "Log in" buttons point. Set to your real app URL.

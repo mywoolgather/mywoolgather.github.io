@@ -134,4 +134,13 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/fireba
     }
   };
 
+  // Tip-jar links shown in Settings → "Support the developer". Fill in your
+  // real funding URLs (Ko-fi, Buy Me a Coffee, PayPal.me, etc.); leave the
+  // array empty to hide the tip options. Opening these just navigates to your
+  // funded page — no payment happens inside the app.
+  window.WG_TIP_LINKS = [
+    // { label: 'Buy me a coffee ☕', url: 'https://buymeacoffee.com/yourname' },
+    { label: 'Buy me a tea ☕', url: 'https://ko-fi.com/cozyplantygirl'},
+  ];
+
   window.dispatchEvent(new Event('firebase-ready'));

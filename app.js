@@ -130,6 +130,7 @@ let STATE = {
   stashSearch: '',
   stashFilterWeight: 'All weights',
   stashFilterFiber: 'All fibers',
+  stashFilterScrap: 'all',
   stashSort: 'recent',
   projFilterStatus: 'All statuses',
   projSort: 'recent',
@@ -137,6 +138,7 @@ let STATE = {
 let pendingColorHex = '#5C3A72';
 let extractedSwatches = [];
 let pendingYarnIsMulticolor = false;
+let _pendingScrapRemaining = null;   // weight-computed remaining length, applied on save
 let pendingYarnColors = [];
 let pendingYarnPrimaryIndex = 0;
 let pendingYarnMatchMode = 'simple'; // 'simple' | 'full' — only meaningful for 2-3 color yarns
@@ -877,7 +879,10 @@ function renderSettingsSheet(){
         <p style="padding:2px 22px 10px; font-family:'Fraunces',serif; font-weight:600;">You're exploring the demo</p>
         <p class="note" style="padding:0 22px 12px;">Everything here is sample data — changes reset on refresh. Create a free account to build your own stash.</p>
         <a class="btn btn-primary" style="margin:0 22px 8px; display:block; text-align:center;" href="${window.WG_SIGNUP_URL || '/woolgather.html'}">Sign up free</a>
-        <a class="btn btn-ghost" style="margin:0 22px; display:block; text-align:center;" href="${window.WG_SIGNUP_URL || '/woolgather.html'}">Log in</a>
+        <a class="btn btn-ghost" style="margin:0 22px 12px; display:block; text-align:center;" href="${window.WG_SIGNUP_URL || '/woolgather.html'}">Log in</a>
+        <div class="sheet-divider"></div>
+        <button onclick="closeSettings(); openTipJar();">💛<span>Support the developer</span></button>
+        <button onclick="closeSettings(); openAbout();">${ICONS.gear}<span>About Woolgather</span></button>
       </div>`
     : `<div class="sheet">
         <div class="sheet-handle"></div>
@@ -901,6 +906,8 @@ function renderSettingsSheet(){
         <button onclick="window.FB.signOutUser()">${ICONS.reset}<span>Sign out</span></button>
         <button onclick="closeSettings(); resetAll();" class="danger-text">${ICONS.trash}<span>Clear my data</span></button>
         <div class="sheet-divider"></div>
+        <button onclick="closeSettings(); openTipJar();">💛<span>Support the developer</span></button>
+        <button onclick="closeSettings(); openAbout();">${ICONS.gear}<span>About Woolgather</span></button>
         <button onclick="closeSettings(); openSupportForm();">${ICONS.link}<span>Contact / support</span></button>
         <button onclick="closeSettings(); startDeleteAccount();" class="danger-text">${ICONS.trash}<span>Delete account</span></button>
       </div>`;
@@ -995,6 +1002,56 @@ function setSetupPref(kind, val){
 /* Contact / support — an in-app form written to the 'support' Firestore
    collection. A Cloud Function watches that collection and emails it to you
    (see support-email setup). Uses the styled modal, not a browser dialog. */
+/* Tip jar — "support the developer." Points at whatever tip links you set in
+   window.WG_TIP_LINKS (Ko-fi, Buy Me a Coffee, PayPal, etc.). Opening a real
+   payment link is the Prohibited-action-safe approach: it just navigates to
+   your funded page; no payment happens inside the app. */
+function openTipJar(){
+  const links = (typeof window !== 'undefined' && window.WG_TIP_LINKS) || [];
+  const root = document.getElementById('wg-modal-root');
+  const linkBtns = links.length
+    ? links.map(l=>`<a class="btn btn-primary" style="display:block; text-align:center; margin-bottom:8px;" href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.label)}</a>`).join('')
+    : `<p class="note">Tip links aren't set up yet.</p>`;
+  root.innerHTML = `<div class="wg-modal-backdrop" id="wg-modal-bd">
+    <div class="wg-modal" role="dialog" aria-modal="true">
+      <h3>Support the developer 💛</h3>
+      <p>Woolgather is built and maintained by one person, and it's free to use. If it's saved you a tangled skein or two, a small tip helps keep it running and ad-free.</p>
+      ${linkBtns}
+      <div class="wg-modal-actions">
+        <button class="btn btn-ghost" id="tip-close">Close</button>
+      </div>
+    </div>
+  </div>`;
+  const bd = document.getElementById('wg-modal-bd');
+  requestAnimationFrame(()=> bd.classList.add('open'));
+  const close = ()=>{ bd.classList.remove('open'); setTimeout(()=>{ root.innerHTML=''; }, 160); };
+  document.getElementById('tip-close').onclick = close;
+  bd.onclick = (e)=>{ if(e.target===bd) close(); };
+}
+/* About / product info — including the explicit "no generative AI in the
+   product" statement. */
+function openAbout(){
+  const root = document.getElementById('wg-modal-root');
+  root.innerHTML = `<div class="wg-modal-backdrop" id="wg-modal-bd">
+    <div class="wg-modal" role="dialog" aria-modal="true" style="max-width:460px;">
+      <h3>About Woolgather</h3>
+      <div style="font-size:0.9rem; line-height:1.55; color:var(--ink); max-height:60vh; overflow-y:auto;">
+        <p style="margin:0 0 12px;">Woolgather is a personal fiber-arts companion: a stash tracker, project log, palette lab, and shopping helper for knitters and crocheters. Your yarn, projects, and palettes sync to your account across every device you sign into.</p>
+        <p style="margin:0 0 12px;"><strong>How it works.</strong> It's a web app (installable to your home screen) backed by a small, standard cloud database for your account and data. Colour matching uses real colour science — perceptual CIELAB / Delta-E maths — not guesswork. Label scanning runs a classic open-source OCR engine locally in your browser. Everything's designed to work offline for viewing once loaded.</p>
+        <p style="margin:0 0 12px;"><strong>No generative AI.</strong> Woolgather does not use generative AI for any part of the product — no AI-generated images, text, colour suggestions, or recommendations. Every feature is built from deterministic code and established colour/OCR algorithms you could trace line by line. What you see is hand-built, not machine-invented.</p>
+        <p class="note" style="margin:0;">Made with care by Mikayla Norton.</p>
+      </div>
+      <div class="wg-modal-actions" style="margin-top:14px;">
+        <button class="btn btn-ghost" id="about-close">Close</button>
+      </div>
+    </div>
+  </div>`;
+  const bd = document.getElementById('wg-modal-bd');
+  requestAnimationFrame(()=> bd.classList.add('open'));
+  const close = ()=>{ bd.classList.remove('open'); setTimeout(()=>{ root.innerHTML=''; }, 160); };
+  document.getElementById('about-close').onclick = close;
+  bd.onclick = (e)=>{ if(e.target===bd) close(); };
+}
 function openSupportForm(){
   const root = document.getElementById('wg-modal-root');
   root.innerHTML = `<div class="wg-modal-backdrop" id="wg-modal-bd">
@@ -1326,6 +1383,9 @@ function renderStash(){
       <select onchange="STATE.stashFilterFiber=this.value; renderTab();">
         ${fiberCats.map(f=>`<option ${(STATE.stashFilterFiber||'All fibers')===f?'selected':''}>${f}</option>`).join('')}
       </select>
+      ${STATE.yarns.some(y=>y.isScrap) ? `<select onchange="STATE.stashFilterScrap=this.value; renderTab();">
+        ${[['all','All yarn'],['scrap','Scraps only'],['full','Full skeins only']].map(([v,l])=>`<option value="${v}" ${(STATE.stashFilterScrap||'all')===v?'selected':''}>${l}</option>`).join('')}
+      </select>` : ''}
       <select onchange="STATE.stashSort=this.value; renderTab();">
         ${[['recent','Newest'],['name','Name A–Z'],['yardage','Most yarn'],['color','Color']].map(([v,l])=>`<option value="${v}" ${(STATE.stashSort||'recent')===v?'selected':''}>${l}</option>`).join('')}
       </select>
@@ -1364,6 +1424,9 @@ function filteredSortedYarns(){
   if(fw && fw!=='All weights') list = list.filter(y=>y.weightCategory===fw);
   const ff = STATE.stashFilterFiber;
   if(ff && ff!=='All fibers') list = list.filter(y=>categorizeFiber(y.fiber)===ff);
+  const fs = STATE.stashFilterScrap;
+  if(fs==='scrap') list = list.filter(y=>y.isScrap);
+  else if(fs==='full') list = list.filter(y=>!y.isScrap);
   const sort = STATE.stashSort || 'recent';
   if(sort==='name') list.sort((a,b)=>yarnDisplayName(a).localeCompare(yarnDisplayName(b)));
   else if(sort==='yardage') list.sort((a,b)=>yarnTotalYardage(b)-yarnTotalYardage(a));
@@ -1380,6 +1443,7 @@ function showYarnForm(id){
   pendingColorHex = editing ? editing.colorHex : '#5C3A72';
   extractedSwatches = [];
   pendingYarnIsMulticolor = !!(editing && editing.isMulticolor);
+  _pendingScrapRemaining = null;   // reset any weight-computed remaining from a prior open
   pendingYarnColors = editing && editing.colors ? [...editing.colors] : [];
   pendingYarnPrimaryIndex = editing && typeof editing.primaryIndex === 'number' ? editing.primaryIndex : 0;
   pendingYarnMatchMode = editing && editing.matchMode ? editing.matchMode : 'simple';
@@ -1448,6 +1512,16 @@ function renderYarnForm(){
     <label class="field">Quantity (skeins)
       <input id="yf-quantity" type="number" min="0" step="any" placeholder="1.5" value="${editing ? esc(editing.quantity) : 1}" />
     </label>
+    <div class="field span2" style="background:rgba(255,255,255,0.4); border:1px dashed var(--border); border-radius:8px; padding:10px;">
+      <span class="note" style="display:block; margin-bottom:6px;">Only have a partial ball? Weigh it and compute what's left. Needs skein weight + length above.</span>
+      <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+        <label style="display:flex; align-items:center; gap:4px; font-size:0.78rem; color:var(--ink-soft);">
+          Current weight <input id="yf-scrapgrams" type="number" min="0" step="any" placeholder="33" style="width:70px;" /> g
+        </label>
+        <button type="button" class="btn btn-ghost btn-small" onclick="computeRemainingFromWeight()">Compute remaining</button>
+        <span id="yf-scrap-result" class="note" style="font-size:0.72rem;"></span>
+      </div>
+    </div>
     <label class="field">Cost per skein (optional)
       <input id="yf-cost" type="number" min="0" step="0.01" value="${v('cost')}" />
     </label>
@@ -1459,6 +1533,11 @@ function renderYarnForm(){
     <label class="field span2" style="flex-direction:row; align-items:center; justify-content:flex-start; gap:8px; text-align:left;">
       <input type="checkbox" id="yf-multicolor" ${pendingYarnIsMulticolor?'checked':''} onchange="toggleMulticolor(this.checked)" style="width:auto; flex-shrink:0;" />
       <span class="muted-ink">This yarn is multicolor (variegated / self-striping / speckled)</span>
+    </label>
+
+    <label class="field span2" style="flex-direction:row; align-items:center; justify-content:flex-start; gap:8px; text-align:left;">
+      <input type="checkbox" id="yf-scrap" ${editing && editing.isScrap ? 'checked':''} style="width:auto; flex-shrink:0;" />
+      <span class="muted-ink">This is a scrap / leftover (partial ball)</span>
     </label>
 
     <div class="span2" id="yf-color-section" style="display:flex; flex-wrap:wrap; align-items:center; gap:14px;">
@@ -1842,17 +1921,23 @@ function handleSaveYarn(e){
     cost: document.getElementById('yf-cost').value === '' ? null : Number(document.getElementById('yf-cost').value),
     purchaseDate: document.getElementById('yf-purchasedate').value || null,
     isMulticolor: multicolor,
+    isScrap: !!(document.getElementById('yf-scrap') && document.getElementById('yf-scrap').checked),
     colors: multicolor ? [...pendingYarnColors] : [],
     primaryIndex: primaryIndex,
     matchMode: multicolor && pendingYarnColors.length<=3 ? pendingYarnMatchMode : 'simple',
     colorHex: multicolor ? pendingYarnColors[primaryIndex] : pendingColorHex
   };
 
+  // If the user computed a remaining length by weight, honor it as the
+  // current remaining (overrides the default "full skeins" amount).
+  const scrapRemaining = _pendingScrapRemaining;
+  _pendingScrapRemaining = null;
+
   if(STATE.editingYarnId){
-    STATE.yarns = STATE.yarns.map(y => y.id===STATE.editingYarnId ? { ...y, ...fields } : y);
+    STATE.yarns = STATE.yarns.map(y => y.id===STATE.editingYarnId ? { ...y, ...fields, ...(scrapRemaining!=null?{yardageRemaining:scrapRemaining}:{}) } : y);
   } else {
     const yarn = { id: uid(), ...fields, status:'available', allocatedTo:null, dateAdded: todayStr() };
-    yarn.yardageRemaining = yarnTotalYardage(yarn);
+    yarn.yardageRemaining = scrapRemaining!=null ? scrapRemaining : yarnTotalYardage(yarn);
     STATE.yarns.push(yarn);
   }
   persist();
@@ -1867,10 +1952,48 @@ async function deleteYarn(id){
   persist();
   renderTab();
 }
+/* Re-weigh an existing stash yarn: enter the current weight on a scale and
+   update its remaining length via the skein ratio. For after you've used some
+   of a ball and want an accurate remaining figure without guessing. */
+async function reweighYarn(id){
+  const y = STATE.yarns.find(yy=>yy.id===id);
+  if(!y) return;
+  const skeinG = Number(y.skeinWeightGrams)||0, skeinYd = Number(y.skeinYardage)||0;
+  if(!skeinG || !skeinYd){ wgToast('This yarn needs skein weight & length recorded first.', 'error'); return; }
+  const val = await wgPrompt(`Weigh what's left of ${yarnDisplayName(y)} and enter its current weight.`, { title:'Update remaining by weight', placeholder:'grams', okLabel:'Update' });
+  if(val===null) return;
+  const grams = Number(val)||0;
+  if(grams<=0){ wgToast('Enter a weight in grams.', 'error'); return; }
+  const remainingYd = Math.round((grams / skeinG) * skeinYd);
+  STATE.yarns = STATE.yarns.map(yy => yy.id===id ? { ...yy, yardageRemaining: remainingYd } : yy);
+  persist();
+  wgToast(`Updated — ≈ ${toDisplayLength(remainingYd)} ${unitLabel()} left.`, 'success');
+  renderTab();
+}
 function changeRemaining(id, val){
   const n = val==='' ? 0 : fromInputLength(val);
   STATE.yarns = STATE.yarns.map(y => y.id===id ? {...y, yardageRemaining:n} : y);
   persist();
+}
+/* Scrap helper: compute remaining LENGTH from a current weight, using the
+   per-skein ratio (length/weight). Reads the form's skein-weight & length,
+   stashes the result in _pendingScrapRemaining (applied on save), and shows
+   a confirmation. Needs both skein specs; otherwise explains what's missing. */
+function computeRemainingFromWeight(){
+  const gramsEl = document.getElementById('yf-scrapgrams');
+  const resultEl = document.getElementById('yf-scrap-result');
+  const grams = Number(gramsEl && gramsEl.value) || 0;
+  const skeinG = Number(document.getElementById('yf-skeinweight').value) || 0;
+  // skein length is entered in display units; convert to canonical yards.
+  const skeinYd = fromInputLength(document.getElementById('yf-skeinyardage').value) || 0;
+  if(!grams){ if(resultEl) resultEl.textContent = 'Enter the current weight first.'; return; }
+  if(!skeinG || !skeinYd){ if(resultEl) resultEl.textContent = 'Add skein weight and length above to compute.'; return; }
+  const remainingYd = Math.round((grams / skeinG) * skeinYd);
+  _pendingScrapRemaining = remainingYd;
+  if(resultEl){
+    resultEl.classList.add('ok-text');
+    resultEl.textContent = `≈ ${toDisplayLength(remainingYd)} ${unitLabel()} left — saved when you save this yarn.`;
+  }
 }
 function toggleYarnStatus(id, projectId){
   STATE.yarns = STATE.yarns.map(y => {
@@ -1915,11 +2038,12 @@ function renderYarnCard(y){
       <div class="yarn-swatch-name">
         <span class="swatch" style="background:${swatchBg}"${swatchTitle}></span>
         <div style="min-width:0;">
-          <p class="yarn-name">${esc(y.name)}</p>
+          <p class="yarn-name">${esc(y.name)}${y.isScrap ? ' <span class="scrap-badge">scrap</span>' : ''}</p>
           ${subtitle ? `<p class="yarn-sub">${subtitle}</p>` : ''}
         </div>
       </div>
       <div style="display:flex; gap:4px; flex-shrink:0;">
+        ${(Number(y.skeinWeightGrams)>0 && Number(y.skeinYardage)>0) ? `<button class="del-btn" onclick="reweighYarn('${y.id}')" aria-label="Update remaining by weight" title="Weigh what's left to update remaining length">⚖️</button>` : ''}
         <button class="del-btn" onclick="showYarnForm('${y.id}')" aria-label="Edit yarn">${ICONS.pencil}</button>
         <button class="del-btn" onclick="deleteYarn('${y.id}')" aria-label="Remove yarn">${ICONS.trash}</button>
       </div>
@@ -2587,8 +2711,22 @@ function renderCounter(projectId, c){
     <span class="counter-value ${atRepeat?'at-repeat':''}">${c.value||0}</span>
     <button class="counter-btn" onclick="adjustCounter('${projectId}','${c.id}',1)" aria-label="Increase">+</button>
     ${repeatInfo}
+    <label class="counter-sts" title="Current stitch count on this row">
+      <input type="number" min="0" inputmode="numeric" value="${c.stitches!=null?c.stitches:''}" placeholder="—" onchange="setCounterStitches('${projectId}','${c.id}',this.value)" /> sts
+    </label>
     <button class="counter-btn subtle" onclick="resetCounter('${projectId}','${c.id}')" aria-label="Reset" title="Reset to 0">↺</button>
   </div>`;
+}
+/* Current stitch count on this counter's row — a free number the user jots
+   and updates as the pattern shapes (e.g. after an increase row). Saved with
+   the counter; deferred save and no re-render, so the field keeps focus while
+   typing. */
+function setCounterStitches(projectId, counterId, val){
+  const p = STATE.projects.find(pp=>pp.id===projectId);
+  const c = p && p.counters && p.counters.find(cc=>cc.id===counterId);
+  if(!c) return;
+  c.stitches = val==='' ? null : Math.max(0, Number(val)||0);
+  persistSoon();
 }
 function toggleCounterPanel(projectId){
   STATE.expandedCounters = STATE.expandedCounters===projectId ? null : projectId;
@@ -2609,6 +2747,7 @@ function resetCounter(projectId, counterId){
   const c = p && p.counters && p.counters.find(cc=>cc.id===counterId);
   if(!c) return;
   c.value = 0;
+  c.stitches = null;   // clearing the counter clears its recorded stitch count too
   persistSoon();
   renderTab();
 }
