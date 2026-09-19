@@ -385,6 +385,8 @@
   .counter-btn{ width:34px; height:34px; border-radius:8px; border:1px solid var(--border); background:var(--card); color:var(--ink); font-size:1.1rem; line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; }
   .counter-btn:active{ background:var(--plum); color:#fff; }
   .counter-btn.subtle{ font-size:0.85rem; color:var(--ink-soft); }
+  .counter-sts{ display:inline-flex; align-items:center; gap:4px; font-size:0.72rem; color:var(--ink-soft); }
+  .counter-sts input{ width:52px; font-size:0.82rem; padding:4px 6px; }
 
 /* Settings unit toggle: override generic .sheet button styles */
 .sheet .harmony-btn {

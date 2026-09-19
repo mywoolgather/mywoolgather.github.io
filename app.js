@@ -792,7 +792,7 @@ function render(){
   const headerRight = window.WG_DEMO
     ? `<div class="header-actions">
          <span class="note">You're viewing a demo</span>
-         <a class="btn btn-primary btn-small" href="${window.WG_SIGNUP_URL || '/woolgather.html'}">Sign up free</a>
+         <a class="btn btn-primary btn-small" href="${window.WG_SIGNUP_URL || '/woolgather.html'}">Create your gathering</a>
          <a class="btn btn-ghost btn-small" href="${window.WG_SIGNUP_URL || '/woolgather.html'}">Log in</a>
        </div>`
     : `<div class="header-actions">
@@ -1251,7 +1251,7 @@ function renderOverview(){
   </div>
   <div class="chart-grid">
     <div class="card chart-card">
-      <p class="chart-title">Yardage owned by fiber</p>
+      <p class="chart-title">Yarn owned by fiber (${unitLabel()})</p>
       ${s.fiberData.length ? '<div class="chart-holder"><canvas id="fiberChart"></canvas></div>' : '<p class="note">Add some yarn to see this.</p>'}
     </div>
     <div class="card chart-card">
@@ -1327,7 +1327,7 @@ function renderStash(){
         ${fiberCats.map(f=>`<option ${(STATE.stashFilterFiber||'All fibers')===f?'selected':''}>${f}</option>`).join('')}
       </select>
       <select onchange="STATE.stashSort=this.value; renderTab();">
-        ${[['recent','Newest'],['name','Name A–Z'],['yardage','Most yardage'],['color','Color']].map(([v,l])=>`<option value="${v}" ${(STATE.stashSort||'recent')===v?'selected':''}>${l}</option>`).join('')}
+        ${[['recent','Newest'],['name','Name A–Z'],['yardage','Most yarn'],['color','Color']].map(([v,l])=>`<option value="${v}" ${(STATE.stashSort||'recent')===v?'selected':''}>${l}</option>`).join('')}
       </select>
     </div>`;
   }
@@ -1405,13 +1405,12 @@ function renderYarnForm(){
       <p class="note" style="margin:6px 0 0;">Drag a label photo here, or choose one — reads printed text and fills what it's confident about. Always double-check before saving. Works best on a flat, well-lit label.</p>
     </div>
     <label class="field">Brand preset (optional)
-      <select id="yf-brand-select" onchange="onBrandChange()">
-        <option value="">Custom / other</option>
-        ${brandOptions}
-      </select>
+      <input id="yf-brand-select" list="yf-brand-presets" placeholder="Type to search presets…" onchange="onBrandChange()" oninput="onBrandChange()" />
+      <datalist id="yf-brand-presets">${brandOptions}</datalist>
     </label>
     <label class="field">Line
-      <select id="yf-line-select" onchange="onLineChange()" disabled><option value="">— pick a brand first —</option></select>
+      <input id="yf-line-select" list="yf-line-presets" placeholder="— pick a brand first —" onchange="onLineChange()" oninput="onLineChange()" disabled />
+      <datalist id="yf-line-presets"></datalist>
     </label>`}
 
     <label class="field">Brand
@@ -1442,7 +1441,7 @@ function renderYarnForm(){
     <label class="field">Skein weight (g)
       <input id="yf-skeinweight" type="number" min="0" placeholder="100" value="${v('skeinWeightGrams')}" />
     </label>
-    <label class="field">Yardage per skein (${unitLabel()})
+    <label class="field">Length per skein (${unitLabel()})
       <input id="yf-skeinyardage" type="number" min="0" placeholder="220" value="${editing ? toDisplayLength(editing.skeinYardage) : ''}" />
     </label>
 
@@ -1481,24 +1480,32 @@ function submitYarnForm(){
 
 function onBrandChange(){
   const brand = document.getElementById('yf-brand-select').value;
-  const lineSelect = document.getElementById('yf-line-select');
-  if(!brand){
-    lineSelect.innerHTML = '<option value="">— pick a brand first —</option>';
-    lineSelect.disabled = true;
+  const lineInput = document.getElementById('yf-line-select');
+  const lineList = document.getElementById('yf-line-presets');
+  // Only populate lines once the typed brand exactly matches a known preset
+  // brand (datalist lets them type freely; we act on a real match).
+  const matchBrand = presetBrands().find(b => b.toLowerCase() === (brand||'').toLowerCase());
+  if(!matchBrand){
+    lineList.innerHTML = '';
+    lineInput.placeholder = '— pick a brand first —';
+    lineInput.disabled = true;
     return;
   }
-  const lines = presetLinesForBrand(brand);
-  lineSelect.innerHTML = '<option value="">— pick a line —</option>' + lines.map(p=>`<option value="${esc(p.line)}">${esc(p.line)}</option>`).join('');
-  lineSelect.disabled = false;
+  const lines = presetLinesForBrand(matchBrand);
+  lineList.innerHTML = lines.map(p=>`<option value="${esc(p.line)}">${esc(p.line)}</option>`).join('');
+  lineInput.placeholder = 'Type to search lines…';
+  lineInput.disabled = false;
 }
 function onLineChange(){
   const brand = document.getElementById('yf-brand-select').value;
   const line = document.getElementById('yf-line-select').value;
   if(!brand || !line) return;
-  const preset = findPreset(brand, line);
+  // Match case-insensitively against presets, since the fields are free text now.
+  const matchBrand = presetBrands().find(b => b.toLowerCase() === brand.toLowerCase());
+  const preset = matchBrand ? presetLinesForBrand(matchBrand).find(p => p.line.toLowerCase() === line.toLowerCase()) : null;
   if(!preset) return;
-  document.getElementById('yf-brand').value = brand;
-  document.getElementById('yf-line').value = line;
+  document.getElementById('yf-brand').value = preset.brand || matchBrand;
+  document.getElementById('yf-line').value = preset.line;
   document.getElementById('yf-fiber').value = preset.fiber;
   document.getElementById('yf-weightcat').value = preset.weightCategory;
   document.getElementById('yf-skeinweight').value = preset.skeinWeightGrams;
@@ -2152,6 +2159,9 @@ function buildYarnPickerHTML(){
     const reqNum = Number(required)||0;
     const remaining = Number(y.yardageRemaining)||0;
     const shortfall = reqNum > remaining ? reqNum - remaining : 0;
+    // Show the "used" value in whatever entry unit was last chosen this session
+    // (skeins/grams/length), so the field doesn't snap back to length on re-render.
+    const usedDisplay = yardsToUsedEntry(used, _usedModeMemory[y.id], y);
     return `<div style="padding:9px 2px; border-bottom:1px dashed var(--border);">
       <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
         <span class="dot" style="background:${(y.isMulticolor && y.colors && y.colors.length>=2) ? buildConicGradient(y.colors) : y.colorHex}; flex-shrink:0;"></span>
@@ -2165,10 +2175,10 @@ function buildYarnPickerHTML(){
           Need <input type="number" min="0" value="${required===''?'':toDisplayLength(required)}" placeholder="0" style="width:60px;" onchange="updateProjectYarnRequired('${y.id}', this.value)" /> ${unitLabel()}
         </label>
         <label style="display:flex; align-items:center; gap:4px; font-size:0.72rem; color:var(--ink-soft);">
-          Used <input type="number" min="0" step="any" value="${toDisplayLength(used)}" style="width:60px;" id="usedin-${y.id}" onchange="updateProjectYarnUsageModal('${y.id}')" />
+          Used <input type="number" min="0" step="any" value="${usedDisplay}" style="width:60px;" id="usedin-${y.id}" onchange="updateProjectYarnUsageModal('${y.id}')" />
           <select id="usedmode-${y.id}" style="font-size:0.7rem; padding:2px 4px;" onchange="onUsedModeChange('${y.id}')">
-            <option value="len" selected>${unitLabel()}</option>
-            ${(Number(y.skeinYardage)>0 && Number(y.skeinWeightGrams)>0) ? `<option value="skeins">skeins</option><option value="grams">g</option>` : ''}
+            <option value="len" ${_usedModeMemory[y.id]!=='skeins'&&_usedModeMemory[y.id]!=='grams'?'selected':''}>${unitLabel()}</option>
+            ${(Number(y.skeinYardage)>0 && Number(y.skeinWeightGrams)>0) ? `<option value="skeins" ${_usedModeMemory[y.id]==='skeins'?'selected':''}>skeins</option><option value="grams" ${_usedModeMemory[y.id]==='grams'?'selected':''}>g</option>` : ''}
           </select>
         </label>
         <span class="note" style="font-size:0.7rem; white-space:nowrap;">${toDisplayLength(remaining)} ${unitLabel()} in stash</span>
@@ -2242,6 +2252,22 @@ function setProjectYarnUsageYards(yarnId, yardsUsed){
   persist();
   refreshYarnPicker();
 }
+/* Session-only memory of the chosen entry unit (len/skeins/grams) per yarn
+   in the project usage picker. Not persisted to Firebase — resets on reload
+   to the yd/m preference — but held during the session so the dropdown and
+   field don't snap back to length after every entry. */
+const _usedModeMemory = {};
+/* Convert canonical yards to the value shown in a given entry mode. */
+function yardsToUsedEntry(yards, mode, yarn){
+  const y = Number(yards)||0;
+  if(mode==='skeins' && yarn && Number(yarn.skeinYardage)>0){
+    return Math.round((y/Number(yarn.skeinYardage))*100)/100;  // 2 dp
+  }
+  if(mode==='grams' && yarn && Number(yarn.skeinWeightGrams)>0 && Number(yarn.skeinYardage)>0){
+    return Math.round((y/Number(yarn.skeinYardage))*Number(yarn.skeinWeightGrams));
+  }
+  return toDisplayLength(y);
+}
 /* Kept for compatibility: interpret a plain length-unit input. */
 function updateProjectYarnUsage(yarnId, val){
   setProjectYarnUsageYards(yarnId, fromInputLength(val));
@@ -2255,6 +2281,7 @@ function updateProjectYarnUsageModal(yarnId){
   if(!numEl) return;
   const n = Number(numEl.value)||0;
   const mode = modeEl ? modeEl.value : 'len';
+  _usedModeMemory[yarnId] = mode;   // remember the chosen unit for this session
   const y = STATE.yarns.find(yy=>yy.id===yarnId);
   let yards;
   if(mode==='skeins' && y && Number(y.skeinYardage)>0){
@@ -2266,12 +2293,12 @@ function updateProjectYarnUsageModal(yarnId){
   }
   setProjectYarnUsageYards(yarnId, yards);
 }
-/* Switching input mode: clear the number so a value typed as one unit isn't
-   re-read as another, and show the equivalent in the new mode is left blank
-   for the user to re-enter. Doesn't change stored usage until they type. */
+/* Switching input mode: remember the new mode, then re-render so the field
+   redisplays the same underlying amount in the newly-chosen unit. */
 function onUsedModeChange(yarnId){
-  const numEl = document.getElementById('usedin-'+yarnId);
-  if(numEl){ numEl.value=''; numEl.focus(); }
+  const modeEl = document.getElementById('usedmode-'+yarnId);
+  _usedModeMemory[yarnId] = modeEl ? modeEl.value : 'len';
+  refreshYarnPicker();
 }
 /* Per-yarn "need" for this project — pure requirement, doesn't touch stock.
    Editing it just re-renders so the per-yarn shortfall updates live. */
@@ -2306,6 +2333,9 @@ function renderProjectForm(){
     </label>
     <label class="field">Pattern (optional)
       <input id="pf-pattern" value="${v('patternName')}" />
+    </label>
+    <label class="field">Hook / needle size (optional)
+      <input id="pf-needlesize" placeholder="e.g. 4.5 mm / US 7" value="${v('needleSize')}" />
     </label>
     <label class="field">Status
       <select id="pf-status">${STATUSES.map(s=>`<option ${(editing ? editing.status===s : s==='Planned')?'selected':''}>${s}</option>`).join('')}</select>
@@ -2457,6 +2487,7 @@ function handleSaveProject(e){
   const fields = {
     name,
     patternName: document.getElementById('pf-pattern').value.trim(),
+    needleSize: document.getElementById('pf-needlesize').value.trim() || null,
     status: document.getElementById('pf-status').value,
     startDate: document.getElementById('pf-startdate').value || todayStr(),
     finishDate: document.getElementById('pf-finishdate').value || null,
@@ -2526,6 +2557,7 @@ function renderProjectRow(p){
       <div class="project-meta">
         ${usedYarns.map(y=>`<span class="dot" style="background:${y.colorHex}" title="${esc(y.name)}"></span>`).join('')}
         ${garmentBadge ? `<span class="note">${esc(garmentBadge)}</span>` : ''}
+        ${p.needleSize ? `<span class="note">🪡 ${esc(p.needleSize)}</span>` : ''}
         ${attachedPalette ? `<span class="note">${ICONS.palette} ${esc(attachedPalette.name)}</span>` : ''}
         ${gapBadge}
         ${counters.length ? `<span class="note">${counters.length} counter${counters.length===1?'':'s'}</span>` : ''}
@@ -3040,10 +3072,13 @@ function googleSearchUrl(item){
   return 'https://www.google.com/search?q=' + encodeURIComponent(shoppingSearchQuery(item));
 }
 function ravelrySearchUrl(item){
-  // Ravelry yarn search by free-text query.
-  return 'https://www.ravelry.com/yarns/search#query=' + encodeURIComponent(
-    [item.colorName, item.weight, item.fiber].filter(Boolean).join(' ')
-  );
+  // Ravelry's free-text yarn search matches on yarn/brand names and
+  // attributes like weight & fiber — NOT descriptive colour phrases
+  // ("sage green" returns nothing). So we search by weight + fiber, which
+  // reliably returns results; colour is better narrowed with Ravelry's own
+  // filters once there. Fall back to a generic term if we have neither.
+  const q = [item.weight, item.fiber].filter(Boolean).join(' ') || 'yarn';
+  return 'https://www.ravelry.com/yarns/search#query=' + encodeURIComponent(q);
 }
 function addShoppingItem(item){
   STATE.shoppingList.unshift({

@@ -72,7 +72,7 @@
       { id:'pal2', name:'Autumn Triad', harmony:'Triadic', matchMode:'balanced', baseYarnId:'y6', slots:[{ role:'Triad', yarnId:'y5', hex:'#3c7a72', closeness:68 },{ role:'Triad', yarnId:'y12', hex:'#5c3a72', closeness:61 }], createdAt:'2026-01-30' }
     ],
     shoppingList: [
-      { id:'s1', colorName:'Sage green', hex:'#8faf7c', weight:'Worsted', fiber:'wool', yardage:200, quantity:2, note:'Complementary palette', sourceType:'palette', sourceId:'pal2', sourceName:'Autumn Triad palette', done:false, createdAt:'2026-02-09' },
+      { id:'s1', colorName:'Red', hex:'#a8342e', weight:'Worsted', fiber:'wool', yardage:200, quantity:2, note:'Complementary palette', sourceType:'palette', sourceId:'pal2', sourceName:'Autumn Triad palette', done:false, createdAt:'2026-02-09' },
       { id:'s2', colorName:'Charcoal 900', hex:'#3a3a3d', weight:'Worsted', fiber:'100% Peruvian Highland Wool', yardage:600, quantity:1, note:'Project gap — Dad\'s Sweater needs more Charcoal 900 to finish the body', sourceType:'project', sourceId:'p3', sourceName:"Dad's Sweater", done:false, createdAt:'2026-02-10' }
     ]
   };
@@ -140,7 +140,7 @@
     bar.setAttribute('role','note');
     bar.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:100;background:#5C3A72;color:#fff;text-align:center;font-family:\'Work Sans\',sans-serif;font-size:0.82rem;padding:8px 14px;display:flex;align-items:center;justify-content:center;gap:12px;flex-wrap:wrap;box-shadow:0 2px 8px rgba(0,0,0,0.2);';
     bar.innerHTML = '<span><strong>Live demo</strong> — sample data, nothing saves. Explore every feature freely.</span>'
-      + '<a href="'+window.WG_SIGNUP_URL+'" style="background:#fff;color:#5C3A72;text-decoration:none;font-weight:600;border-radius:6px;padding:4px 12px;white-space:nowrap;">Create your gathering</a>';
+      + '<a href="'+window.WG_SIGNUP_URL+'" style="background:#fff;color:#5C3A72;text-decoration:none;font-weight:600;border-radius:6px;padding:4px 12px;white-space:nowrap;">Create your gathering →</a>';
     document.body.appendChild(bar);
     // Push app content down so the banner never covers the header.
     const wrapFix = document.createElement('style');

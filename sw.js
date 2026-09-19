@@ -16,7 +16,7 @@
    line for avoiding "I deployed a fix but still see the old app".
 */
 
-const CACHE_VERSION = 'woolgather-v10';
+const CACHE_VERSION = 'woolgather-v11';
 const SHELL_CACHE = `${CACHE_VERSION}-shell`;
 const PHOTO_CACHE = `${CACHE_VERSION}-photos`;
 
