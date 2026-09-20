@@ -131,6 +131,12 @@ let STATE = {
   stashFilterWeight: 'All weights',
   stashFilterFiber: 'All fibers',
   stashFilterScrap: 'all',
+  gauge: {            // standalone gauge calculator inputs (session-held)
+    craft:'knit', stitchType:'', needleSize:'',
+    measUnit:'in', measSize:4,
+    sts:'', rows:'',
+    targetSts:'', targetRows:''
+  },
   stashSort: 'recent',
   projFilterStatus: 'All statuses',
   projSort: 'recent',
@@ -752,6 +758,7 @@ function tabRegistry(){
     { id:'palette', label:'Palette lab', icon:ICONS.palette },
     { id:'showcase', label:'Showcase', icon:ICONS.image, addLabel:'Add project' },
     { id:'shopping', label:'Shopping list', icon:ICONS.cart },
+    { id:'gauge', label:'Gauge calculator', icon:ICONS.clipboard },
   ];
   if(isAdmin()) tabs.push({ id:'presets', label:'Presets', icon:ICONS.bookmark });
   return tabs;
@@ -1037,8 +1044,8 @@ function openAbout(){
       <h3>About Woolgather</h3>
       <div style="font-size:0.9rem; line-height:1.55; color:var(--ink); max-height:60vh; overflow-y:auto;">
         <p style="margin:0 0 12px;">Woolgather is a personal fiber-arts companion: a stash tracker, project log, palette lab, and shopping helper for knitters and crocheters. Your yarn, projects, and palettes sync to your account across every device you sign into.</p>
-        <p style="margin:0 0 12px;"><strong>How it works.</strong> It's a web app (installable to your home screen) backed by a small, standard cloud database for your account and data. Colour matching uses real colour science (perceptual CIELAB / Delta-E maths) not guesswork. Label scanning runs a classic open-source OCR engine locally in your browser. Everything's designed to work offline for viewing once loaded.</p>
-        <p style="margin:0 0 12px;"><strong>No generative AI.</strong> Woolgather does not use generative AI for any part of the product, no AI-generated images, text, colour suggestions, or recommendations. Every feature is built from deterministic code and established colour/OCR algorithms you could trace line by line. What you see is hand-built, not machine-invented.</p>
+        <p style="margin:0 0 12px;"><strong>How it works.</strong> It's a web app (installable to your home screen) backed by a small, standard cloud database for your account and data. Colour matching uses real colour science — perceptual CIELAB / Delta-E maths — not guesswork. Label scanning runs a classic open-source OCR engine locally in your browser. Everything's designed to work offline for viewing once loaded.</p>
+        <p style="margin:0 0 12px;"><strong>No generative AI.</strong> Woolgather does not use generative AI for any part of the product — no AI-generated images, text, colour suggestions, or recommendations. Every feature is built from deterministic code and established colour/OCR algorithms you could trace line by line. What you see is hand-built, not machine-invented.</p>
         <p class="note" style="margin:0;">Made with care by Mikayla Norton.</p>
       </div>
       <div class="wg-modal-actions" style="margin-top:14px;">
@@ -1235,6 +1242,7 @@ function renderTab(){
   else if(STATE.tab==='palette') el.innerHTML = renderPalette();
   else if(STATE.tab==='showcase') el.innerHTML = renderShowcase();
   else if(STATE.tab==='shopping') el.innerHTML = renderShopping();
+  else if(STATE.tab==='gauge') el.innerHTML = renderGauge();
   else if(STATE.tab==='presets') el.innerHTML = renderPresetsAdmin();
 
   if(STATE.tab==='overview') renderCharts();
@@ -2461,6 +2469,17 @@ function renderProjectForm(){
     <label class="field">Hook / needle size (optional)
       <input id="pf-needlesize" placeholder="e.g. 4.5 mm / US 7" value="${v('needleSize')}" />
     </label>
+    <div class="field span2">
+      <span class="note" style="display:block; margin-bottom:4px;">Gauge achieved (optional) — record what you got, to reproduce it later</span>
+      <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap; font-size:0.8rem; color:var(--ink-soft);">
+        <input id="pf-gauge-sts" type="number" min="0" step="any" placeholder="18" style="width:60px;" value="${editing && editing.gauge ? esc(editing.gauge.sts??'') : ''}" /> sts ×
+        <input id="pf-gauge-rows" type="number" min="0" step="any" placeholder="24" style="width:60px;" value="${editing && editing.gauge ? esc(editing.gauge.rows??'') : ''}" /> rows per
+        <select id="pf-gauge-unit">
+          <option value="in" ${editing && editing.gauge && editing.gauge.unit==='cm'?'':'selected'}>4 in</option>
+          <option value="cm" ${editing && editing.gauge && editing.gauge.unit==='cm'?'selected':''}>10 cm</option>
+        </select>
+      </div>
+    </div>
     <label class="field">Status
       <select id="pf-status">${STATUSES.map(s=>`<option ${(editing ? editing.status===s : s==='Planned')?'selected':''}>${s}</option>`).join('')}</select>
     </label>
@@ -2612,6 +2631,12 @@ function handleSaveProject(e){
     name,
     patternName: document.getElementById('pf-pattern').value.trim(),
     needleSize: document.getElementById('pf-needlesize').value.trim() || null,
+    gauge: (()=>{
+      const s = document.getElementById('pf-gauge-sts').value;
+      const r = document.getElementById('pf-gauge-rows').value;
+      if(s==='' && r==='') return null;
+      return { sts: s===''?null:Number(s), rows: r===''?null:Number(r), unit: document.getElementById('pf-gauge-unit').value };
+    })(),
     status: document.getElementById('pf-status').value,
     startDate: document.getElementById('pf-startdate').value || todayStr(),
     finishDate: document.getElementById('pf-finishdate').value || null,
@@ -2682,6 +2707,7 @@ function renderProjectRow(p){
         ${usedYarns.map(y=>`<span class="dot" style="background:${y.colorHex}" title="${esc(y.name)}"></span>`).join('')}
         ${garmentBadge ? `<span class="note">${esc(garmentBadge)}</span>` : ''}
         ${p.needleSize ? `<span class="note">🪡 ${esc(p.needleSize)}</span>` : ''}
+        ${p.gauge && (p.gauge.sts||p.gauge.rows) ? `<span class="note">📐 ${p.gauge.sts||'?'}×${p.gauge.rows||'?'}/${p.gauge.unit==='cm'?'10cm':'4in'}</span>` : ''}
         ${attachedPalette ? `<span class="note">${ICONS.palette} ${esc(attachedPalette.name)}</span>` : ''}
         ${gapBadge}
         ${counters.length ? `<span class="note">${counters.length} counter${counters.length===1?'':'s'}</span>` : ''}
@@ -3315,6 +3341,117 @@ function renderShoppingForm(){
       <button type="submit" class="btn btn-primary">${editing?'Save changes':'Add item'}</button>
     </div>
   </form>`;
+}
+
+/* =================================================================
+   Gauge calculator (standalone). Enter a swatch — stitches & rows over a
+   measurement (in or cm), plus the conditions (knit/crochet, stitch type,
+   hook/needle). Computes stitches-per-unit and rows-per-unit. If a target
+   gauge is entered (from the pattern), compares and reports how far off you
+   are and which direction to adjust the hook/needle.
+================================================================= */
+function gaugeUpdate(field, val){
+  STATE.gauge[field] = val;
+  // Only the result area needs refreshing; re-render the whole tab is simplest
+  // and keeps inputs in sync, but that blurs fields. Instead update the result
+  // panel in place so typing stays smooth.
+  const el = document.getElementById('gauge-result');
+  if(el) el.innerHTML = buildGaugeResultHTML();
+}
+function buildGaugeResultHTML(){
+  const g = STATE.gauge;
+  const meas = Number(g.measSize)||0;
+  const sts = Number(g.sts)||0;
+  const rows = Number(g.rows)||0;
+  const unit = g.measUnit==='cm' ? 'cm' : 'in';
+  if(!meas || !sts){
+    return `<p class="note">Enter your swatch measurement and stitch count to see your gauge.</p>`;
+  }
+  const stsPer = sts/meas;
+  const rowsPer = rows>0 ? rows/meas : null;
+  // Standard reference is per 4 in / per 10 cm.
+  const refSpan = unit==='cm' ? 10 : 4;
+  const stsPerRef = Math.round(stsPer*refSpan*10)/10;
+  const rowsPerRef = rowsPer!=null ? Math.round(rowsPer*refSpan*10)/10 : null;
+
+  let out = `<div class="card" style="margin-top:4px;">
+    <p style="margin:0 0 6px; font-weight:600; font-family:'Fraunces',serif;">Your gauge</p>
+    <p style="margin:0; font-size:0.9rem;">${Math.round(stsPer*10)/10} sts / ${unit} · <strong>${stsPerRef} sts per ${refSpan} ${unit}</strong></p>
+    ${rowsPerRef!=null ? `<p style="margin:2px 0 0; font-size:0.9rem;">${Math.round(rowsPer*10)/10} rows / ${unit} · <strong>${rowsPerRef} rows per ${refSpan} ${unit}</strong></p>` : ''}
+  </div>`;
+
+  // Target comparison
+  const tSts = Number(g.targetSts)||0;
+  if(tSts>0){
+    // Target is expressed per the same reference span the user is working in.
+    const diffPct = ((stsPerRef - tSts) / tSts) * 100;
+    const absPct = Math.abs(Math.round(diffPct));
+    let verdict, advice, cls;
+    if(absPct <= 3){
+      verdict = 'On gauge ✓'; cls='ok-text';
+      advice = 'Your stitch gauge matches the target closely — you\'re good to go.';
+    } else if(diffPct > 0){
+      // more stitches per span than target = your stitches are smaller = tighter
+      verdict = `Running tight — ${absPct}% too many stitches`; cls='danger-text';
+      advice = 'Your stitches are smaller than the pattern\'s, so your piece will come out too small. Try going up a hook/needle size and re-swatching.';
+    } else {
+      verdict = `Running loose — ${absPct}% too few stitches`; cls='danger-text';
+      advice = 'Your stitches are larger than the pattern\'s, so your piece will come out too big. Try going down a hook/needle size and re-swatching.';
+    }
+    out += `<div class="card" style="margin-top:10px;">
+      <p style="margin:0 0 4px; font-weight:600;" class="${cls}">${esc(verdict)}</p>
+      <p class="note" style="margin:0;">Target: ${tSts} sts per ${refSpan} ${unit} · You: ${stsPerRef}</p>
+      <p style="margin:6px 0 0; font-size:0.85rem;">${advice}</p>
+    </div>`;
+  }
+  return out;
+}
+function renderGauge(){
+  const g = STATE.gauge;
+  const unit = g.measUnit==='cm' ? 'cm' : 'in';
+  const refSpan = unit==='cm' ? 10 : 4;
+  return `
+  <p class="note" style="margin:0 0 16px;">Knit or crochet a swatch, then enter what you measured. Gauge determines whether your finished piece comes out the right size.</p>
+  <div class="card form-grid" style="margin-bottom:16px;">
+    <label class="field">Craft
+      <select onchange="gaugeUpdate('craft', this.value)">
+        <option value="knit" ${g.craft==='knit'?'selected':''}>Knit</option>
+        <option value="crochet" ${g.craft==='crochet'?'selected':''}>Crochet</option>
+      </select>
+    </label>
+    <label class="field">Stitch type (optional)
+      <input value="${esc(g.stitchType)}" placeholder="${g.craft==='crochet'?'e.g. single crochet':'e.g. stockinette'}" onchange="gaugeUpdate('stitchType', this.value)" />
+    </label>
+    <label class="field">Hook / needle size (optional)
+      <input value="${esc(g.needleSize)}" placeholder="e.g. 4.5 mm / US 7" onchange="gaugeUpdate('needleSize', this.value)" />
+    </label>
+    <label class="field">Measure over
+      <div style="display:flex; gap:6px; align-items:center;">
+        <input type="number" min="0" step="any" value="${esc(g.measSize)}" style="width:64px;" onchange="gaugeUpdate('measSize', this.value)" />
+        <select onchange="gaugeUpdate('measUnit', this.value)">
+          <option value="in" ${g.measUnit==='in'?'selected':''}>inches</option>
+          <option value="cm" ${g.measUnit==='cm'?'selected':''}>cm</option>
+        </select>
+      </div>
+    </label>
+    <label class="field">Stitches counted
+      <input type="number" min="0" step="any" value="${esc(g.sts)}" placeholder="18" onchange="gaugeUpdate('sts', this.value)" />
+    </label>
+    <label class="field">Rows counted (optional)
+      <input type="number" min="0" step="any" value="${esc(g.rows)}" placeholder="24" onchange="gaugeUpdate('rows', this.value)" />
+    </label>
+  </div>
+
+  <details class="card" style="margin-bottom:16px;">
+    <summary style="cursor:pointer; font-weight:600; font-family:'Fraunces',serif;">Compare to a pattern's target gauge (optional)</summary>
+    <p class="note" style="margin:8px 0;">Enter the gauge your pattern calls for, per ${refSpan} ${unit}, to check if you're on gauge.</p>
+    <label class="field" style="max-width:220px;">Target stitches per ${refSpan} ${unit}
+      <input type="number" min="0" step="any" value="${esc(g.targetSts)}" placeholder="20" onchange="gaugeUpdate('targetSts', this.value)" />
+    </label>
+  </details>
+
+  <div id="gauge-result">${buildGaugeResultHTML()}</div>
+  `;
 }
 
 function renderShopping(){
