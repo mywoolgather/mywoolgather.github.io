@@ -112,6 +112,21 @@
   .swatch{ width:28px; height:28px; border-radius:50%; flex-shrink:0; border:1px solid var(--border); }
   .yarn-name{ font-family:'Fraunces',serif; font-weight:600; margin:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .scrap-badge{ font-family:'Work Sans',sans-serif; font-size:0.6rem; font-weight:600; text-transform:uppercase; letter-spacing:0.04em; background:var(--sage,#8FAF7C); color:#fff; border-radius:4px; padding:1px 5px; vertical-align:middle; }
+  .onboard-grid{ display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:18px; text-align:left; }
+  @media (max-width:560px){ .onboard-grid{ grid-template-columns:1fr; } }
+  .onboard-card{ display:flex; flex-direction:column; gap:4px; background:var(--card); border:1px solid var(--border); border-radius:10px; padding:14px; }
+  .onboard-card strong{ font-family:'Fraunces',serif; font-size:0.95rem; }
+  .onboard-icon{ color:var(--plum); }
+  .onboard-icon .icon{ width:22px; height:22px; }
+  /* Accessibility: visible keyboard-focus ring on interactive elements
+     (mouse clicks don't trigger :focus-visible, so this only shows for
+     keyboard/AT users and doesn't change the mouse experience). */
+  a:focus-visible, button:focus-visible, input:focus-visible,
+  select:focus-visible, textarea:focus-visible, [tabindex]:focus-visible{
+    outline:2px solid var(--plum); outline-offset:2px; border-radius:4px;
+  }
+  .wg-skip-link{ position:absolute; left:-9999px; top:0; z-index:200; background:var(--plum); color:#fff; padding:10px 16px; border-radius:0 0 8px 0; }
+  .wg-skip-link:focus{ left:0; }
   .yarn-sub{ font-size:0.75rem; color:var(--ink-soft); margin:1px 0 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .del-btn{ background:none; border:none; color:var(--ink-soft); cursor:pointer; padding:2px; }
   .del-btn:hover{ color:var(--wine); }
@@ -201,6 +216,12 @@
 
   /* ---- In-app modal + toast (replaces all browser dialogs) ---- */
   .wg-modal-backdrop{ position:fixed; inset:0; z-index:90; background:rgba(30,25,40,0.45); display:flex; align-items:center; justify-content:center; padding:20px; opacity:0; pointer-events:none; transition:opacity 0.16s; }
+  #wg-lightbox{ background:rgba(20,16,26,0.88); }
+  .lightbox-inner{ position:relative; max-width:92vw; max-height:88vh; display:flex; flex-direction:column; align-items:center; gap:10px; }
+  .lightbox-img{ max-width:92vw; max-height:80vh; border-radius:10px; object-fit:contain; box-shadow:0 8px 40px rgba(0,0,0,0.5); }
+  .lightbox-controls{ display:flex; align-items:center; gap:14px; color:#fff; }
+  .lightbox-controls .note{ color:#fff; }
+  .lightbox-close{ position:absolute; top:-14px; right:-14px; width:34px; height:34px; border-radius:50%; background:#fff; color:var(--ink); border:none; font-size:1rem; cursor:pointer; box-shadow:0 2px 8px rgba(0,0,0,0.3); }
   .wg-modal-backdrop.open{ opacity:1; pointer-events:auto; }
   .wg-modal{ background:var(--card); border:1px solid var(--border); border-radius:14px; padding:20px; max-width:400px; width:100%; box-shadow:0 12px 40px rgba(0,0,0,0.25); transform:translateY(8px); transition:transform 0.16s; }
   .wg-modal-backdrop.open .wg-modal{ transform:translateY(0); }

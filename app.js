@@ -135,7 +135,8 @@ let STATE = {
     craft:'knit', stitchType:'', needleSize:'',
     measUnit:'in', measSize:4,
     sts:'', rows:'',
-    targetSts:'', targetRows:''
+    targetSts:'', targetRows:'',
+    castonWidth:''   // desired finished width for the cast-on calculator
   },
   stashSort: 'recent',
   projFilterStatus: 'All statuses',
@@ -911,6 +912,8 @@ function renderSettingsSheet(){
           </div>
         </div>
         <button onclick="window.FB.signOutUser()">${ICONS.reset}<span>Sign out</span></button>
+        <button onclick="closeSettings(); exportStash('json');">${ICONS.package}<span>Back up my data (JSON)</span></button>
+        <button onclick="closeSettings(); exportStash('csv');">${ICONS.package}<span>Export stash (CSV)</span></button>
         <button onclick="closeSettings(); resetAll();" class="danger-text">${ICONS.trash}<span>Clear my data</span></button>
         <div class="sheet-divider"></div>
         <button onclick="closeSettings(); openTipJar();">💛<span>Support the developer</span></button>
@@ -1299,10 +1302,17 @@ function computeStats(){
 
 function renderOverview(){
   if(STATE.yarns.length===0 && STATE.projects.length===0){
-    return `<div class="empty">
+    return `<div class="empty" style="max-width:560px; margin:0 auto;">
       <p class="title">Welcome to Woolgather 🧶</p>
-      <p class="body">Your quiet ledger for yarn, projects, and palettes. Start by logging a skein or two — then the dashboard, palette matching, and shopping tools all come to life. Everything saves to your account and syncs across your devices.</p>
-      <button class="btn btn-primary" onclick="switchTab('stash')">${ICONS.plus} Add your first yarn</button>
+      <p class="body">Your quiet ledger for yarn, projects, and palettes — no ads, no AI, just a calm place to track your craft. Here's what you can do:</p>
+      <div class="onboard-grid">
+        <div class="onboard-card"><span class="onboard-icon">${ICONS.package}</span><strong>Log your stash</strong><span class="note">Yarn, colors, and how much you have left. Scan a label to autofill, or weigh a scrap to log leftovers.</span></div>
+        <div class="onboard-card"><span class="onboard-icon">${ICONS.sparkles}</span><strong>Track projects</strong><span class="note">Link yarn, count rows, note your gauge, and see finished makes in the Showcase.</span></div>
+        <div class="onboard-card"><span class="onboard-icon">${ICONS.palette}</span><strong>Match colors</strong><span class="note">The Palette Lab uses real color science to find harmonies in your stash — or colors to shop for.</span></div>
+        <div class="onboard-card"><span class="onboard-icon">${ICONS.cart}</span><strong>Plan &amp; shop</strong><span class="note">Turn project gaps into a shopping list, and check gauge before you cast on.</span></div>
+      </div>
+      <button class="btn btn-primary" style="margin-top:18px;" onclick="switchTab('stash')">${ICONS.plus} Add your first yarn</button>
+      <p class="note" style="margin-top:10px;">Everything saves to your account and syncs across your devices.</p>
     </div>`;
   }
   const s = computeStats();
@@ -1982,6 +1992,44 @@ function changeRemaining(id, val){
   const n = val==='' ? 0 : fromInputLength(val);
   STATE.yarns = STATE.yarns.map(y => y.id===id ? {...y, yardageRemaining:n} : y);
   persist();
+}
+/* Export / backup. JSON = complete backup of everything (re-importable later);
+   CSV = the stash as a flat, spreadsheet-friendly table. Both download client-
+   side via a Blob — no server involved. */
+function downloadFile(filename, text, mime){
+  const blob = new Blob([text], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url), 1000);
+}
+function exportStash(format){
+  const stamp = todayStr();
+  if(format==='json'){
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      app: 'Woolgather',
+      yarns: STATE.yarns,
+      projects: STATE.projects,
+      palettes: STATE.paletteSavedPalettes,
+      shoppingList: STATE.shoppingList
+    };
+    downloadFile(`woolgather-backup-${stamp}.json`, JSON.stringify(payload, null, 2), 'application/json');
+    wgToast('Backup downloaded.', 'success');
+    return;
+  }
+  // CSV — stash only, flat and readable.
+  const cols = ['Brand','Line','Colorway','Colorway #','Dye lot','Fiber','Weight','Skein weight (g)','Length/skein','Quantity','Length remaining','Unit','Cost/skein','Scrap','Status'];
+  const csvEsc = (v)=>{ const s=(v==null?'':String(v)); return /[",\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s; };
+  const rows = STATE.yarns.map(y=>[
+    y.brand, y.line, y.colorway, y.colorwayNumber, y.dyeLot, y.fiber, y.weightCategory,
+    y.skeinWeightGrams, toDisplayLength(y.skeinYardage), y.quantity,
+    toDisplayLength(y.yardageRemaining), unitLabel(), y.cost, y.isScrap?'yes':'', y.status
+  ].map(csvEsc).join(','));
+  const csv = cols.join(',') + '\n' + rows.join('\n');
+  downloadFile(`woolgather-stash-${stamp}.csv`, csv, 'text/csv');
+  wgToast('Stash CSV downloaded.', 'success');
 }
 /* Scrap helper: compute remaining LENGTH from a current weight, using the
    per-skein ratio (length/weight). Reads the form's skein-weight & length,
@@ -2679,6 +2727,34 @@ function updateProjectStatus(id, status){
   persist();
   renderTab();
 }
+/* Duplicate a project — copies the PLAN (name, pattern, needle, gauge, linked
+   yarns, per-yarn "need", counter setup) but resets PROGRESS: status back to
+   Planned, no dates, no photos, and usage cleared (so it doesn't double-deduct
+   stock or double-reference the original's uploaded photos). For remaking the
+   same thing without re-entering everything. */
+function duplicateProject(id){
+  const src = STATE.projects.find(p=>p.id===id);
+  if(!src) return;
+  const copy = {
+    ...JSON.parse(JSON.stringify(src)),
+    id: uid(),
+    name: (src.name||'Project') + ' (copy)',
+    status: 'Planned',
+    startDate: todayStr(),
+    finishDate: null,
+    yarnUsage: [],                 // reset progress so stock isn't double-counted
+    photos: [],                    // don't share the original's uploaded images
+    createdAt: todayStr()
+  };
+  // Keep counters' configuration but zero their live progress.
+  if(Array.isArray(copy.counters)){
+    copy.counters = copy.counters.map(c=>({ ...c, value:0, stitches:null }));
+  }
+  STATE.projects.unshift(copy);
+  persist();
+  wgToast('Project duplicated — progress reset, plan kept.', 'success');
+  renderTab();
+}
 
 function renderProjectRow(p){
   const usedYarns = STATE.yarns.filter(y => (p.yarnIds||[]).includes(y.id));
@@ -2721,6 +2797,7 @@ function renderProjectRow(p){
     </select>
     ${counterToggle}
     ${gapInfo && gapInfo.gap>0 ? `<button class="del-btn" onclick="shopProjectGap('${p.id}')" aria-label="Add gap to shopping list" title="Add the ${Math.round(gapInfo.gap)} yd gap to your shopping list">${ICONS.cart}</button>` : ''}
+    <button class="del-btn" onclick="duplicateProject('${p.id}')" aria-label="Duplicate project" title="Make a copy of this project">⧉</button>
     <button class="del-btn" onclick="showProjectForm('${p.id}')" aria-label="Edit project">${ICONS.pencil}</button>
     <button class="del-btn" onclick="deleteProject('${p.id}')" aria-label="Delete project">${ICONS.trash}</button>
   </div>`;
@@ -3203,7 +3280,7 @@ function renderShowcaseCard(p){
   const garmentBadge = (p.garmentSize || p.garmentGender) ? [p.garmentGender, p.garmentSize].filter(Boolean).join(' · ') : null;
   return `<div class="card showcase-card">
     ${mainImage
-      ? `<img class="showcase-photo" src="${esc(mainImage)}" alt="${esc(p.name)}" />`
+      ? `<img class="showcase-photo" src="${esc(mainImage)}" alt="${esc(p.name)}" style="cursor:zoom-in;" onclick="openLightbox('${p.id}')" />`
       : `<div class="showcase-placeholder">No photo yet</div>`}
     <div class="showcase-body">
       <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px;">
@@ -3220,6 +3297,55 @@ function renderShowcaseCard(p){
     </div>
   </div>`;
 }
+
+/* Photo lightbox for the Showcase — tap a project photo to view it large,
+   with prev/next paging when a project has multiple photos. */
+let _lightbox = { photos: [], i: 0 };
+function openLightbox(projectId){
+  const p = STATE.projects.find(pp=>pp.id===projectId);
+  if(!p) return;
+  const photos = (p.photos||[]).slice();
+  if(!photos.length){
+    const thumb = (p.links||[]).map(l=>l.thumbnail).find(Boolean);
+    if(thumb) photos.push(thumb);
+  }
+  if(!photos.length) return;
+  _lightbox = { photos, i: 0 };
+  drawLightbox();
+}
+function drawLightbox(){
+  const root = document.getElementById('wg-modal-root');
+  const { photos, i } = _lightbox;
+  const multi = photos.length > 1;
+  root.innerHTML = `<div class="wg-modal-backdrop open" id="wg-lightbox" style="align-items:center;">
+    <div class="lightbox-inner">
+      <img src="${esc(photos[i])}" alt="" class="lightbox-img" />
+      ${multi ? `<div class="lightbox-controls">
+        <button class="btn btn-ghost btn-small" onclick="lightboxStep(-1)" aria-label="Previous">‹</button>
+        <span class="note">${i+1} / ${photos.length}</span>
+        <button class="btn btn-ghost btn-small" onclick="lightboxStep(1)" aria-label="Next">›</button>
+      </div>` : ''}
+      <button class="lightbox-close" onclick="closeLightbox()" aria-label="Close">✕</button>
+    </div>
+  </div>`;
+  const bd = document.getElementById('wg-lightbox');
+  bd.onclick = (e)=>{ if(e.target===bd) closeLightbox(); };
+}
+function lightboxStep(d){
+  const n = _lightbox.photos.length;
+  _lightbox.i = (_lightbox.i + d + n) % n;
+  drawLightbox();
+}
+function closeLightbox(){
+  const root = document.getElementById('wg-modal-root');
+  if(root) root.innerHTML = '';
+}
+document.addEventListener('keydown', (e)=>{
+  if(!document.getElementById('wg-lightbox')) return;
+  if(e.key==='Escape') closeLightbox();
+  else if(e.key==='ArrowLeft') lightboxStep(-1);
+  else if(e.key==='ArrowRight') lightboxStep(1);
+});
 
 /* =================================================================
    Shopping list — first-class saved object. Gaps from projects and
@@ -3404,6 +3530,19 @@ function buildGaugeResultHTML(){
       <p style="margin:6px 0 0; font-size:0.85rem;">${advice}</p>
     </div>`;
   }
+
+  // Cast-on calculator: desired finished width -> stitches to cast on, at
+  // this gauge. Uses stitches-per-unit directly, so it's exact for the unit
+  // the swatch was measured in.
+  const width = Number(g.castonWidth)||0;
+  if(width>0){
+    const castOn = Math.round(stsPer * width);
+    out += `<div class="card" style="margin-top:10px;">
+      <p style="margin:0 0 4px; font-weight:600; font-family:'Fraunces',serif;">Cast on</p>
+      <p style="margin:0; font-size:0.95rem;">For a <strong>${width} ${unit}</strong> width at your gauge, cast on about <strong>${castOn} stitches</strong>.</p>
+      <p class="note" style="margin:6px 0 0;">Rounded to the nearest stitch. Add any edge/selvedge or pattern-repeat stitches your pattern calls for.</p>
+    </div>`;
+  }
   return out;
 }
 function renderGauge(){
@@ -3447,6 +3586,14 @@ function renderGauge(){
     <p class="note" style="margin:8px 0;">Enter the gauge your pattern calls for, per ${refSpan} ${unit}, to check if you're on gauge.</p>
     <label class="field" style="max-width:220px;">Target stitches per ${refSpan} ${unit}
       <input type="number" min="0" step="any" value="${esc(g.targetSts)}" placeholder="20" onchange="gaugeUpdate('targetSts', this.value)" />
+    </label>
+  </details>
+
+  <details class="card" style="margin-bottom:16px;">
+    <summary style="cursor:pointer; font-weight:600; font-family:'Fraunces',serif;">Cast-on calculator (optional)</summary>
+    <p class="note" style="margin:8px 0;">Enter a finished width and we'll tell you how many stitches to cast on at your gauge.</p>
+    <label class="field" style="max-width:220px;">Desired finished width (${unit})
+      <input type="number" min="0" step="any" value="${esc(g.castonWidth)}" placeholder="${unit==='cm'?'50':'20'}" onchange="gaugeUpdate('castonWidth', this.value)" />
     </label>
   </details>
 
@@ -3712,6 +3859,15 @@ async function handleAddPreset(){
    then reacts to sign-in / sign-out for as long as the page is open.
 ================================================================= */
 function initApp(){
+  // Accessibility: announce toasts to screen readers, and add a skip link.
+  const toastRoot = document.getElementById('wg-toast-root');
+  if(toastRoot){ toastRoot.setAttribute('aria-live','polite'); toastRoot.setAttribute('aria-atomic','true'); }
+  if(!document.getElementById('wg-skip')){
+    const skip = document.createElement('a');
+    skip.id = 'wg-skip'; skip.className = 'wg-skip-link'; skip.href = '#app';
+    skip.textContent = 'Skip to content';
+    document.body.insertBefore(skip, document.body.firstChild);
+  }
   render(); // shows "Connecting…"
 
   // Re-render when crossing the mobile/desktop breakpoint so the layout
