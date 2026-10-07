@@ -623,3 +623,8 @@
     justify-content:flex-start;
   }
 }
+/* Project notes preview on the project list row */
+.project-notes{ margin:6px 0 0; }
+.project-notes summary{ cursor:pointer; overflow:hidden; text-overflow:ellipsis; }
+.project-notes-full{ white-space:pre-wrap; margin-top:4px; color:var(--ink); font-size:0.82rem; }
+textarea{ resize:vertical; }

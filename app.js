@@ -170,7 +170,7 @@ let statusChartInstance = null;
 async function persist(){
   if(!STATE.user) return;
   try{
-    await window.FB.saveUserData(STATE.user.uid, { yarns: STATE.yarns, projects: STATE.projects, palettes: STATE.paletteSavedPalettes, shoppingList: STATE.shoppingList, prefs: {unitPref: STATE.unitPref, theme: STATE.theme,   preferencesSetup: true} });
+    await window.FB.saveUserData(STATE.user.uid, { yarns: STATE.yarns, projects: STATE.projects, palettes: STATE.paletteSavedPalettes, shoppingList: STATE.shoppingList, prefs: {unitPref: STATE.unitPref, theme: STATE.theme, preferencesSetup: true, stashSort: STATE.stashSort, projSort: STATE.projSort} });
   }catch(e){
     console.error('Save failed', e);
     wgToast("Couldn't save to your account — check your connection and try again.", "error");
@@ -261,6 +261,17 @@ async function loadPresetsFromFirestore(){
 ================================================================= */
 function uid(){ return (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : String(Math.random()).slice(2); }
 function todayStr(){ return new Date().toISOString().slice(0,10); }
+/* After any save, jump back to the top of the page so the user lands on the
+   list (where a new entry shows first under the default "Newest" sort) rather
+   than wherever the long form left the scroll position. */
+function scrollToTop(){
+  requestAnimationFrame(()=> window.scrollTo({ top:0, behavior:'auto' }));
+}
+function setSort(key, value){
+  STATE[key] = value;
+  renderTab();
+  persist();   // sort choice is remembered on the account
+}
 function daysBetween(a,b){ const d = Math.round((new Date(b) - new Date(a)) / 86400000); return Number.isFinite(d) ? d : null; }
 function esc(s){ return (s==null?'':String(s)).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
@@ -1249,7 +1260,6 @@ function renderTab(){
   else if(STATE.tab==='presets') el.innerHTML = renderPresetsAdmin();
 
   if(STATE.tab==='overview') renderCharts();
-  if(STATE.tab==='stash' && STATE.showYarnForm) wireBrandSelectors();
   syncFormScrollLock();
 }
 
@@ -1404,8 +1414,8 @@ function renderStash(){
       ${STATE.yarns.some(y=>y.isScrap) ? `<select onchange="STATE.stashFilterScrap=this.value; renderTab();">
         ${[['all','All yarn'],['scrap','Scraps only'],['full','Full skeins only']].map(([v,l])=>`<option value="${v}" ${(STATE.stashFilterScrap||'all')===v?'selected':''}>${l}</option>`).join('')}
       </select>` : ''}
-      <select onchange="STATE.stashSort=this.value; renderTab();">
-        ${[['recent','Newest'],['name','Name A–Z'],['yardage','Most yarn'],['color','Color']].map(([v,l])=>`<option value="${v}" ${(STATE.stashSort||'recent')===v?'selected':''}>${l}</option>`).join('')}
+      <select onchange="setSort('stashSort', this.value)" aria-label="Sort stash">
+        ${[['recent','Newest'],['updated','Recently updated'],['name','Name A–Z'],['color','Color'],['weight','Weight (light → heavy)'],['yardage','Most yarn left']].map(([v,l])=>`<option value="${v}" ${(STATE.stashSort||'recent')===v?'selected':''}>${l}</option>`).join('')}
       </select>
     </div>`;
   }
@@ -1432,6 +1442,10 @@ function setStashSearch(v){
     grid.innerHTML = shown.map(renderYarnCard).join('');
   }
 }
+function weightRank(w){ const i = WEIGHTS.indexOf(w); return i<0 ? 99 : i; }
+// Last-edited stamp for "Recently updated"; entries saved before this existed
+// fall back to the date they were added.
+function updatedKey(x){ return x.updatedAt || x.dateAdded || x.createdAt || ''; }
 function filteredSortedYarns(){
   let list = [...STATE.yarns];
   const q = (STATE.stashSearch||'').toLowerCase().trim();
@@ -1447,7 +1461,9 @@ function filteredSortedYarns(){
   else if(fs==='full') list = list.filter(y=>!y.isScrap);
   const sort = STATE.stashSort || 'recent';
   if(sort==='name') list.sort((a,b)=>yarnDisplayName(a).localeCompare(yarnDisplayName(b)));
-  else if(sort==='yardage') list.sort((a,b)=>yarnTotalYardage(b)-yarnTotalYardage(a));
+  else if(sort==='yardage') list.sort((a,b)=>(Number(b.yardageRemaining)||0)-(Number(a.yardageRemaining)||0));
+  else if(sort==='weight') list.sort((a,b)=>weightRank(a.weightCategory)-weightRank(b.weightCategory) || yarnDisplayName(a).localeCompare(yarnDisplayName(b)));
+  else if(sort==='updated') list.sort((a,b)=>updatedKey(b).localeCompare(updatedKey(a)));
   else if(sort==='color') list.sort((a,b)=>hexToHsl(a.colorHex||'#000').h - hexToHsl(b.colorHex||'#000').h);
   else list.reverse(); // recent = newest first (added order reversed)
   return list;
@@ -1952,9 +1968,9 @@ function handleSaveYarn(e){
   _pendingScrapRemaining = null;
 
   if(STATE.editingYarnId){
-    STATE.yarns = STATE.yarns.map(y => y.id===STATE.editingYarnId ? { ...y, ...fields, ...(scrapRemaining!=null?{yardageRemaining:scrapRemaining}:{}) } : y);
+    STATE.yarns = STATE.yarns.map(y => y.id===STATE.editingYarnId ? { ...y, ...fields, ...(scrapRemaining!=null?{yardageRemaining:scrapRemaining}:{}), updatedAt: new Date().toISOString() } : y);
   } else {
-    const yarn = { id: uid(), ...fields, status:'available', allocatedTo:null, dateAdded: todayStr() };
+    const yarn = { id: uid(), ...fields, status:'available', allocatedTo:null, dateAdded: todayStr(), updatedAt: new Date().toISOString() };
     yarn.yardageRemaining = scrapRemaining!=null ? scrapRemaining : yarnTotalYardage(yarn);
     STATE.yarns.push(yarn);
   }
@@ -1962,6 +1978,7 @@ function handleSaveYarn(e){
   STATE.showYarnForm = false;
   STATE.editingYarnId = null;
   renderTab();
+  scrollToTop();
 }
 
 async function deleteYarn(id){
@@ -2145,8 +2162,8 @@ function renderProjects(){
       <select onchange="STATE.projFilterStatus=this.value; renderTab();">
         ${['All statuses',...STATUSES].map(s=>`<option ${(STATE.projFilterStatus||'All statuses')===s?'selected':''}>${s}</option>`).join('')}
       </select>
-      <select onchange="STATE.projSort=this.value; renderTab();">
-        ${[['recent','Newest'],['name','Name A–Z'],['status','By status']].map(([v,l])=>`<option value="${v}" ${(STATE.projSort||'recent')===v?'selected':''}>${l}</option>`).join('')}
+      <select onchange="setSort('projSort', this.value)" aria-label="Sort projects">
+        ${[['recent','Newest'],['updated','Recently updated'],['name','Name A–Z'],['status','By status'],['start','Start date']].map(([v,l])=>`<option value="${v}" ${(STATE.projSort||'recent')===v?'selected':''}>${l}</option>`).join('')}
       </select>
     </div>`;
   }
@@ -2156,6 +2173,8 @@ function renderProjects(){
   const sort = STATE.projSort || 'recent';
   if(sort==='name') list.sort((a,b)=>a.name.localeCompare(b.name));
   else if(sort==='status'){ const order={WIP:0,Planned:1,Finished:2,Frogged:3}; list.sort((a,b)=>(order[a.status]??9)-(order[b.status]??9)); }
+  else if(sort==='start') list.sort((a,b)=>(b.startDate||'').localeCompare(a.startDate||''));
+  else if(sort==='updated') list.sort((a,b)=>updatedKey(b).localeCompare(updatedKey(a)));
   else list.reverse();
 
   if(list.length===0){
@@ -2586,6 +2605,10 @@ function renderProjectForm(){
       <div id="pf-yarn-picker">${buildYarnPickerHTML()}</div>
     </div>
 
+    <label class="field span2">Notes (optional)
+      <textarea id="pf-notes" rows="4" placeholder="Modifications, where you left off, what you'd change next time…">${v('notes')}</textarea>
+    </label>
+
     <div class="span2">
       <span class="note field-label">Links (pattern, YouTube tutorial, blog post…)</span>
       <div class="link-input-row">
@@ -2679,6 +2702,7 @@ function handleSaveProject(e){
     name,
     patternName: document.getElementById('pf-pattern').value.trim(),
     needleSize: document.getElementById('pf-needlesize').value.trim() || null,
+    notes: document.getElementById('pf-notes').value.trim() || null,
     gauge: (()=>{
       const s = document.getElementById('pf-gauge-sts').value;
       const r = document.getElementById('pf-gauge-rows').value;
@@ -2699,9 +2723,9 @@ function handleSaveProject(e){
     links: pendingProjectLinks.map(l=>({ id:l.id, url:l.url, type:l.type, title:l.title, thumbnail:l.thumbnail }))
   };
   if(existing){
-    STATE.projects = STATE.projects.map(p => p.id===STATE.editingProjectId ? { ...p, ...fields } : p);
+    STATE.projects = STATE.projects.map(p => p.id===STATE.editingProjectId ? { ...p, ...fields, updatedAt: new Date().toISOString() } : p);
   } else {
-    STATE.projects.push({ id: STATE.editingProjectId, ...fields, createdAt: todayStr() });
+    STATE.projects.push({ id: STATE.editingProjectId, ...fields, createdAt: todayStr(), updatedAt: new Date().toISOString() });
   }
   persist();
   STATE.showProjectForm = false;
@@ -2711,6 +2735,7 @@ function handleSaveProject(e){
   pendingProjectPhotos = [];
   pendingProjectCounters = [];
   renderTab();
+  scrollToTop();
 }
 
 async function deleteProject(id){
@@ -2744,16 +2769,18 @@ function duplicateProject(id){
     finishDate: null,
     yarnUsage: [],                 // reset progress so stock isn't double-counted
     photos: [],                    // don't share the original's uploaded images
-    createdAt: todayStr()
+    createdAt: todayStr(),
+    updatedAt: new Date().toISOString()
   };
   // Keep counters' configuration but zero their live progress.
   if(Array.isArray(copy.counters)){
     copy.counters = copy.counters.map(c=>({ ...c, value:0, stitches:null }));
   }
-  STATE.projects.unshift(copy);
+  STATE.projects.push(copy);   // array is oldest→newest, so "Newest" shows it first
   persist();
   wgToast('Project duplicated — progress reset, plan kept.', 'success');
   renderTab();
+  scrollToTop();
 }
 
 function renderProjectRow(p){
@@ -2789,6 +2816,7 @@ function renderProjectRow(p){
         ${counters.length ? `<span class="note">${counters.length} counter${counters.length===1?'':'s'}</span>` : ''}
         ${daysActive!=null ? `<span class="days">${daysActive}d in progress</span>` : ''}
       </div>
+      ${p.notes ? renderProjectNotes(p.notes) : ''}
       ${linkStrip}
       ${counterPanel}
     </div>
@@ -2801,6 +2829,17 @@ function renderProjectRow(p){
     <button class="del-btn" onclick="showProjectForm('${p.id}')" aria-label="Edit project">${ICONS.pencil}</button>
     <button class="del-btn" onclick="deleteProject('${p.id}')" aria-label="Delete project">${ICONS.trash}</button>
   </div>`;
+}
+/* Project notes on the list row: first line as a one-line preview; tap to
+   expand the full text (line breaks preserved). */
+function renderProjectNotes(notes){
+  const first = notes.split('\n')[0];
+  const more = notes.length > first.length || first.length > 80;
+  if(!more) return `<p class="project-notes note">📝 ${esc(first)}</p>`;
+  return `<details class="project-notes note">
+    <summary>📝 ${esc(first.length>80 ? first.slice(0,80)+'…' : first)}</summary>
+    <div class="project-notes-full">${esc(notes)}</div>
+  </details>`;
 }
 /* --- Row counters (used from the project row; configured in the edit form) --- */
 function renderCounter(projectId, c){
@@ -3224,6 +3263,7 @@ async function saveCurrentPalette(){
   persist();
   wgToast('Palette saved.', 'success');
   renderTab();
+  scrollToTop();
 }
 async function deleteSavedPalette(id){
   if(!(await wgConfirm('Delete this saved palette?', {title:'Delete palette', okLabel:'Delete', danger:true}))) return;
@@ -3441,6 +3481,7 @@ function submitShoppingForm(e){
   STATE.showShoppingForm = false;
   STATE.editingShoppingId = null;
   renderTab();
+  scrollToTop();
 }
 function renderShoppingForm(){
   const editing = STATE.editingShoppingId ? STATE.shoppingList.find(i=>i.id===STATE.editingShoppingId) : null;
@@ -3920,6 +3961,10 @@ function initApp(){
       STATE.preferencesSetup =
         data && data.prefs &&
         data.prefs.preferencesSetup === true;
+
+      // Remembered sort choices (filters stay session-only).
+      STATE.stashSort = (data && data.prefs && data.prefs.stashSort) || 'recent';
+      STATE.projSort = (data && data.prefs && data.prefs.projSort) || 'recent';
 
       applyTheme();
 
