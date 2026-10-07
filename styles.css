@@ -635,3 +635,12 @@ textarea{ resize:vertical; }
 .gauge-swatch-grid{ display:grid; grid-template-columns:auto 80px auto 80px auto; gap:8px; align-items:center; color:var(--ink); margin-top:4px; }
 .gauge-swatch-grid input{ width:100%; }
 .gauge-result-card{ background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:12px; font-size:0.9rem; }
+
+/* Scraps (partial balls) */
+.scrap-editor{ background:rgba(255,255,255,0.4); border:1px dashed var(--border); border-radius:8px; padding:10px; }
+:root[data-theme="dark"] .scrap-editor{ background:transparent; }
+.scrap-line{ margin-top:8px; display:flex; flex-direction:column; gap:4px; }
+.scrap-chips{ display:flex; flex-wrap:wrap; gap:6px; }
+.scrap-chip{ display:inline-flex; align-items:center; gap:2px; border:1px solid var(--border); border-radius:999px; padding:1px 4px 1px 8px; font-size:0.72rem; background:var(--bg); color:var(--ink); }
+.scrap-chip button{ background:none; border:none; cursor:pointer; color:var(--ink-soft); font-size:0.68rem; padding:2px 4px; font-family:inherit; }
+.scrap-chip .scrap-chip-main{ color:var(--ink); font-size:0.72rem; padding:0; text-decoration:underline dotted; }

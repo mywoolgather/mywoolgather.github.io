@@ -32,7 +32,19 @@ function weightLabel(name){
    (dropdown, matching, OCR). Any yarn saved with the old value is
    normalized on load so it keeps matching and displaying correctly. */
 function normalizeLegacyYarn(y){
-  if(y && y.weightCategory === 'Aran') return { ...y, weightCategory: 'Worsted' };
+  if(!y) return y;
+  if(y.weightCategory === 'Aran') y = { ...y, weightCategory: 'Worsted' };
+  // Scraps: before partial balls were tracked individually, a yarn was either
+  // flagged isScrap or simply had a remaining length that wasn't a whole
+  // number of skeins. Turn that leftover part into one scrap so it can be
+  // re-weighed and picked from when recording project usage.
+  if(!Array.isArray(y.scraps)){
+    const sy = Number(y.skeinYardage)||0, rem = Number(y.yardageRemaining)||0;
+    let part = 0;
+    if(sy>0 && rem>0) part = (y.isScrap && rem<sy) ? rem : Math.round(rem % sy);
+    else if(y.isScrap && rem>0) part = rem;
+    y = { ...y, scraps: part>=1 && (sy===0 || part<sy) ? [{ id: uid(), yards: Math.round(part) }] : [] };
+  }
   return y;
 }
 const STATUSES = ["Planned","WIP","Finished","Frogged"];
@@ -148,7 +160,7 @@ let STATE = {
 let pendingColorHex = '#5C3A72';
 let extractedSwatches = [];
 let pendingYarnIsMulticolor = false;
-let _pendingScrapRemaining = null;   // weight-computed remaining length, applied on save
+let pendingYarnScraps = [];   // scraps being edited in the yarn form ({id, yards})
 let pendingYarnColors = [];
 let pendingYarnPrimaryIndex = 0;
 let pendingYarnMatchMode = 'simple'; // 'simple' | 'full' — only meaningful for 2-3 color yarns
@@ -337,7 +349,58 @@ function wgPrompt(message, { title='', defaultValue='', okLabel='Save', placehol
     bd.onclick = (e)=>{ if(e.target===bd) close(null); };
   });
 }
-function yarnTotalYardage(y){ return (Number(y.skeinYardage)||0) * (Number(y.quantity)||1); }
+function yarnTotalYardage(y){ return (Number(y.skeinYardage)||0) * (Number(y.quantity)||0); }
+/* Scraps / partial balls. yardageRemaining stays the yarn's total on hand;
+   `scraps` lists the partial balls inside that total, so
+       full-skein length = yardageRemaining − sum(scraps).
+   Several scraps of one colorway live on the same entry. */
+function yarnScraps(y){ return (y && Array.isArray(y.scraps)) ? y.scraps : []; }
+function scrapYards(y){ return yarnScraps(y).reduce((s,c)=>s+(Number(c.yards)||0), 0); }
+function fullYards(y){ return Math.max(0, (Number(y.yardageRemaining)||0) - scrapYards(y)); }
+function fullSkeinCount(y){
+  const sy = Number(y.skeinYardage)||0;
+  return sy>0 ? Math.round(fullYards(y)/sy*10)/10 : null;
+}
+function yardsToGrams(y, yards){
+  const sg = Number(y.skeinWeightGrams)||0, sy = Number(y.skeinYardage)||0;
+  return sg>0 && sy>0 ? Math.round(yards/sy*sg) : null;
+}
+function gramsToYards(y, grams){
+  const sg = Number(y.skeinWeightGrams)||0, sy = Number(y.skeinYardage)||0;
+  return sg>0 && sy>0 ? Math.round(grams/sg*sy) : null;
+}
+function scrapLabel(y, c){
+  const g = yardsToGrams(y, c.yards);
+  return g!=null ? `${g} g` : `${toDisplayLength(c.yards)} ${unitLabel()}`;
+}
+/* Record `yards` used from a yarn, taken from `source`: 'new' (open fresh
+   skeins — whatever's left of the last one opened becomes a new scrap) or a
+   scrap id (that scrap shrinks; once used up it disappears). Pure: returns
+   the updated yarn. */
+function applyYarnUse(y, yards, source){
+  yards = Math.max(0, Math.round(Number(yards)||0));
+  let scraps = yarnScraps(y).map(c=>({ ...c }));
+  if(source && source!=='new'){
+    const c = scraps.find(cc=>cc.id===source);
+    const have = c ? (Number(c.yards)||0) : 0;
+    if(c && yards > have){
+      // Finished the scrap and kept going: the rest comes from a new skein.
+      const rest = { ...y, scraps: scraps.filter(cc=>cc.id!==source), yardageRemaining:(Number(y.yardageRemaining)||0) - have };
+      return applyYarnUse(rest, yards - have, 'new');
+    }
+    if(c) c.yards = have - yards;
+    scraps = scraps.filter(cc=>cc.yards>0);
+  } else {
+    const sy = Number(y.skeinYardage)||0, full = fullYards(y);
+    const take = Math.min(yards, full);
+    if(sy>0 && take>0){
+      const opened = Math.ceil(take/sy);
+      const leftover = Math.round(Math.min(opened*sy, full) - take);
+      if(leftover>0) scraps.push({ id: uid(), yards: leftover });
+    }
+  }
+  return { ...y, scraps, yardageRemaining: (Number(y.yardageRemaining)||0) - yards };
+}
 /* Length units. Storage is always canonical yards; these convert only at the
    display/input edges based on the user's preference. */
 const YD_PER_M = 1.0936133;
@@ -1414,8 +1477,8 @@ function renderStash(){
       <select onchange="STATE.stashFilterFiber=this.value; renderTab();">
         ${fiberCats.map(f=>`<option ${(STATE.stashFilterFiber||'All fibers')===f?'selected':''}>${f}</option>`).join('')}
       </select>
-      ${STATE.yarns.some(y=>y.isScrap) ? `<select onchange="STATE.stashFilterScrap=this.value; renderTab();">
-        ${[['all','All yarn'],['scrap','Scraps only'],['full','Full skeins only']].map(([v,l])=>`<option value="${v}" ${(STATE.stashFilterScrap||'all')===v?'selected':''}>${l}</option>`).join('')}
+      ${STATE.yarns.some(y=>yarnScraps(y).length) ? `<select onchange="STATE.stashFilterScrap=this.value; renderTab();">
+        ${[['all','All yarn'],['scrap','Has scraps'],['full','Has full skeins']].map(([v,l])=>`<option value="${v}" ${(STATE.stashFilterScrap||'all')===v?'selected':''}>${l}</option>`).join('')}
       </select>` : ''}
       <select onchange="setSort('stashSort', this.value)" aria-label="Sort stash">
         ${[['recent','Newest'],['updated','Recently updated'],['name','Name A–Z'],['color','Color'],['weight','Weight (light → heavy)'],['yardage','Most yarn left']].map(([v,l])=>`<option value="${v}" ${(STATE.stashSort||'recent')===v?'selected':''}>${l}</option>`).join('')}
@@ -1460,8 +1523,8 @@ function filteredSortedYarns(){
   const ff = STATE.stashFilterFiber;
   if(ff && ff!=='All fibers') list = list.filter(y=>categorizeFiber(y.fiber)===ff);
   const fs = STATE.stashFilterScrap;
-  if(fs==='scrap') list = list.filter(y=>y.isScrap);
-  else if(fs==='full') list = list.filter(y=>!y.isScrap);
+  if(fs==='scrap') list = list.filter(y=>yarnScraps(y).length>0);
+  else if(fs==='full') list = list.filter(y=>{ const sy=Number(y.skeinYardage)||0; return sy>0 ? fullYards(y)>=sy-0.5 : fullYards(y)>0; });
   const sort = STATE.stashSort || 'recent';
   if(sort==='name') list.sort((a,b)=>yarnDisplayName(a).localeCompare(yarnDisplayName(b)));
   else if(sort==='yardage') list.sort((a,b)=>(Number(b.yardageRemaining)||0)-(Number(a.yardageRemaining)||0));
@@ -1480,7 +1543,7 @@ function showYarnForm(id){
   pendingColorHex = editing ? editing.colorHex : '#5C3A72';
   extractedSwatches = [];
   pendingYarnIsMulticolor = !!(editing && editing.isMulticolor);
-  _pendingScrapRemaining = null;   // reset any weight-computed remaining from a prior open
+  pendingYarnScraps = editing ? yarnScraps(editing).map(c=>({ ...c })) : [];
   pendingYarnColors = editing && editing.colors ? [...editing.colors] : [];
   pendingYarnPrimaryIndex = editing && typeof editing.primaryIndex === 'number' ? editing.primaryIndex : 0;
   pendingYarnMatchMode = editing && editing.matchMode ? editing.matchMode : 'simple';
@@ -1546,16 +1609,20 @@ function renderYarnForm(){
       <input id="yf-skeinyardage" type="number" min="0" placeholder="220" value="${editing ? toDisplayLength(editing.skeinYardage) : ''}" />
     </label>
 
-    <label class="field">Quantity (skeins)
-      <input id="yf-quantity" type="number" min="0" step="any" placeholder="1.5" value="${editing ? esc(editing.quantity) : 1}" />
+    <label class="field">Full skeins
+      <input id="yf-quantity" type="number" min="0" step="1" placeholder="1" value="${editing ? esc(editing.quantity) : 1}" />
+      <span class="note" style="font-size:0.7rem;">Only have scraps? Enter 0 and add them below.</span>
     </label>
-    <div class="field span2" style="background:rgba(255,255,255,0.4); border:1px dashed var(--border); border-radius:8px; padding:10px;">
-      <span class="note" style="display:block; margin-bottom:6px;">Only have a partial ball? Weigh it and compute what's left. Needs skein weight + length above.</span>
-      <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-        <label style="display:flex; align-items:center; gap:4px; font-size:0.78rem; color:var(--ink-soft);">
-          Current weight <input id="yf-scrapgrams" type="number" min="0" step="any" placeholder="33" style="width:70px;" /> g
-        </label>
-        <button type="button" class="btn btn-ghost btn-small" onclick="computeRemainingFromWeight()">Compute remaining</button>
+    <div class="span2 scrap-editor">
+      <span class="note" style="display:block; margin-bottom:6px;">Scraps / partial balls — add each leftover ball of this colorway. Weigh it (needs skein weight + length above) or enter its length.</span>
+      <div id="yf-scrap-list">${buildPendingScrapsHTML()}</div>
+      <div class="row mt-2">
+        <input id="yf-scrap-amt" type="number" min="0" step="any" placeholder="33" style="width:80px;" aria-label="Scrap amount" />
+        <select id="yf-scrap-unit" aria-label="Scrap unit">
+          <option value="g">g</option>
+          <option value="len">${unitLabel()}</option>
+        </select>
+        <button type="button" class="btn btn-ghost btn-small" onclick="addPendingScrap()">${ICONS.plus} Add scrap</button>
         <span id="yf-scrap-result" class="note" style="font-size:0.72rem;"></span>
       </div>
     </div>
@@ -1570,11 +1637,6 @@ function renderYarnForm(){
     <label class="field span2" style="flex-direction:row; align-items:center; justify-content:flex-start; gap:8px; text-align:left;">
       <input type="checkbox" id="yf-multicolor" ${pendingYarnIsMulticolor?'checked':''} onchange="toggleMulticolor(this.checked)" style="width:auto; flex-shrink:0;" />
       <span class="muted-ink">This yarn is multicolor (variegated / self-striping / speckled)</span>
-    </label>
-
-    <label class="field span2" style="flex-direction:row; align-items:center; justify-content:flex-start; gap:8px; text-align:left;">
-      <input type="checkbox" id="yf-scrap" ${editing && editing.isScrap ? 'checked':''} style="width:auto; flex-shrink:0;" />
-      <span class="muted-ink">This is a scrap / leftover (partial ball)</span>
     </label>
 
     <div class="span2" id="yf-color-section" style="display:flex; flex-wrap:wrap; align-items:center; gap:14px;">
@@ -1953,28 +2015,32 @@ function handleSaveYarn(e){
     weightCategory: document.getElementById('yf-weightcat').value,
     skeinWeightGrams: Number(document.getElementById('yf-skeinweight').value) || 0,
     skeinYardage: fromInputLength(document.getElementById('yf-skeinyardage').value) || 0,
-    quantity: Number(document.getElementById('yf-quantity').value) || 1,
+    quantity: document.getElementById('yf-quantity').value==='' ? 1 : Math.max(0, Number(document.getElementById('yf-quantity').value)||0),
     // (accepts decimals like 1.5 for partial/scrap skeins)
     cost: document.getElementById('yf-cost').value === '' ? null : Number(document.getElementById('yf-cost').value),
     purchaseDate: document.getElementById('yf-purchasedate').value || null,
     isMulticolor: multicolor,
-    isScrap: !!(document.getElementById('yf-scrap') && document.getElementById('yf-scrap').checked),
     colors: multicolor ? [...pendingYarnColors] : [],
     primaryIndex: primaryIndex,
     matchMode: multicolor && pendingYarnColors.length<=3 ? pendingYarnMatchMode : 'simple',
     colorHex: multicolor ? pendingYarnColors[primaryIndex] : pendingColorHex
   };
 
-  // If the user computed a remaining length by weight, honor it as the
-  // current remaining (overrides the default "full skeins" amount).
-  const scrapRemaining = _pendingScrapRemaining;
-  _pendingScrapRemaining = null;
+  // Scraps edited in the form. On edit, the total on hand moves by however
+  // much the scraps changed; a new yarn starts with its full skeins + scraps.
+  const scraps = pendingYarnScraps.filter(c=>c.yards>0).map(c=>({ ...c }));
+  const newScrapYd = scraps.reduce((t,c)=>t+c.yards, 0);
+  pendingYarnScraps = [];
 
   if(STATE.editingYarnId){
-    STATE.yarns = STATE.yarns.map(y => y.id===STATE.editingYarnId ? { ...y, ...fields, ...(scrapRemaining!=null?{yardageRemaining:scrapRemaining}:{}), updatedAt: new Date().toISOString() } : y);
+    STATE.yarns = STATE.yarns.map(y => y.id===STATE.editingYarnId ? {
+      ...y, ...fields, scraps,
+      yardageRemaining: (Number(y.yardageRemaining)||0) - scrapYards(y) + newScrapYd,
+      updatedAt: new Date().toISOString()
+    } : y);
   } else {
-    const yarn = { id: uid(), ...fields, status:'available', allocatedTo:null, dateAdded: todayStr(), updatedAt: new Date().toISOString() };
-    yarn.yardageRemaining = scrapRemaining!=null ? scrapRemaining : yarnTotalYardage(yarn);
+    const yarn = { id: uid(), ...fields, scraps, status:'available', allocatedTo:null, dateAdded: todayStr(), updatedAt: new Date().toISOString() };
+    yarn.yardageRemaining = yarnTotalYardage(yarn) + newScrapYd;
     STATE.yarns.push(yarn);
   }
   persist();
@@ -1988,24 +2054,6 @@ async function deleteYarn(id){
   if(!(await wgConfirm('Remove this yarn from your stash? This cannot be undone.', {title:'Remove yarn', okLabel:'Remove', danger:true}))) return;
   STATE.yarns = STATE.yarns.filter(y=>y.id!==id);
   persist();
-  renderTab();
-}
-/* Re-weigh an existing stash yarn: enter the current weight on a scale and
-   update its remaining length via the skein ratio. For after you've used some
-   of a ball and want an accurate remaining figure without guessing. */
-async function reweighYarn(id){
-  const y = STATE.yarns.find(yy=>yy.id===id);
-  if(!y) return;
-  const skeinG = Number(y.skeinWeightGrams)||0, skeinYd = Number(y.skeinYardage)||0;
-  if(!skeinG || !skeinYd){ wgToast('This yarn needs skein weight & length recorded first.', 'error'); return; }
-  const val = await wgPrompt(`Weigh what's left of ${yarnDisplayName(y)} and enter its current weight.`, { title:'Update remaining by weight', placeholder:'grams', okLabel:'Update' });
-  if(val===null) return;
-  const grams = Number(val)||0;
-  if(grams<=0){ wgToast('Enter a weight in grams.', 'error'); return; }
-  const remainingYd = Math.round((grams / skeinG) * skeinYd);
-  STATE.yarns = STATE.yarns.map(yy => yy.id===id ? { ...yy, yardageRemaining: remainingYd } : yy);
-  persist();
-  wgToast(`Updated — ≈ ${toDisplayLength(remainingYd)} ${unitLabel()} left.`, 'success');
   renderTab();
 }
 function changeRemaining(id, val){
@@ -2040,36 +2088,94 @@ function exportStash(format){
     return;
   }
   // CSV — stash only, flat and readable.
-  const cols = ['Brand','Line','Colorway','Colorway #','Dye lot','Fiber','Weight','Skein weight (g)','Length/skein','Quantity','Length remaining','Unit','Cost/skein','Scrap','Status'];
+  const cols = ['Brand','Line','Colorway','Colorway #','Dye lot','Fiber','Weight','Skein weight (g)','Length/skein','Quantity','Length remaining','Unit','Cost/skein','Scraps','Status'];
   const csvEsc = (v)=>{ const s=(v==null?'':String(v)); return /[",\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s; };
   const rows = STATE.yarns.map(y=>[
     y.brand, y.line, y.colorway, y.colorwayNumber, y.dyeLot, y.fiber, y.weightCategory,
     y.skeinWeightGrams, toDisplayLength(y.skeinYardage), y.quantity,
-    toDisplayLength(y.yardageRemaining), unitLabel(), y.cost, y.isScrap?'yes':'', y.status
+    toDisplayLength(y.yardageRemaining), unitLabel(), y.cost, yarnScraps(y).map(c=>toDisplayLength(c.yards)).join(' / '), y.status
   ].map(csvEsc).join(','));
   const csv = cols.join(',') + '\n' + rows.join('\n');
   downloadFile(`woolgather-stash-${stamp}.csv`, csv, 'text/csv');
   wgToast('Stash CSV downloaded.', 'success');
 }
-/* Scrap helper: compute remaining LENGTH from a current weight, using the
-   per-skein ratio (length/weight). Reads the form's skein-weight & length,
-   stashes the result in _pendingScrapRemaining (applied on save), and shows
-   a confirmation. Needs both skein specs; otherwise explains what's missing. */
-function computeRemainingFromWeight(){
-  const gramsEl = document.getElementById('yf-scrapgrams');
+/* Yarn-form scrap editor: add/remove partial balls before saving. Weight is
+   converted to length with the skein ratio typed into the form above. */
+function formSkeinSpecs(){
+  return {
+    skeinWeightGrams: Number(document.getElementById('yf-skeinweight').value) || 0,
+    skeinYardage: fromInputLength(document.getElementById('yf-skeinyardage').value) || 0
+  };
+}
+function buildPendingScrapsHTML(){
+  if(!pendingYarnScraps.length) return `<p class="note no-margin" style="font-size:0.75rem;">No scraps.</p>`;
+  // While the form is first being built its inputs don't exist yet; use the
+  // yarn being edited for the weight ratio.
+  const specs = document.getElementById('yf-skeinweight') ? formSkeinSpecs()
+    : (STATE.yarns.find(y=>y.id===STATE.editingYarnId) || {});
+  return `<div class="scrap-chips">${pendingYarnScraps.map(c=>`<span class="scrap-chip">${esc(scrapLabel(specs, c))}
+    <button type="button" onclick="removePendingScrap('${c.id}')" aria-label="Remove scrap">✕</button></span>`).join('')}</div>`;
+}
+function addPendingScrap(){
+  const amt = Number(document.getElementById('yf-scrap-amt').value)||0;
+  const unit = document.getElementById('yf-scrap-unit').value;
   const resultEl = document.getElementById('yf-scrap-result');
-  const grams = Number(gramsEl && gramsEl.value) || 0;
-  const skeinG = Number(document.getElementById('yf-skeinweight').value) || 0;
-  // skein length is entered in display units; convert to canonical yards.
-  const skeinYd = fromInputLength(document.getElementById('yf-skeinyardage').value) || 0;
-  if(!grams){ if(resultEl) resultEl.textContent = 'Enter the current weight first.'; return; }
-  if(!skeinG || !skeinYd){ if(resultEl) resultEl.textContent = 'Add skein weight and length above to compute.'; return; }
-  const remainingYd = Math.round((grams / skeinG) * skeinYd);
-  _pendingScrapRemaining = remainingYd;
-  if(resultEl){
-    resultEl.classList.add('ok-text');
-    resultEl.textContent = `≈ ${toDisplayLength(remainingYd)} ${unitLabel()} left — saved when you save this yarn.`;
-  }
+  if(amt<=0){ resultEl.textContent = 'Enter an amount first.'; return; }
+  let yards;
+  if(unit==='g'){
+    yards = gramsToYards(formSkeinSpecs(), amt);
+    if(yards==null){ resultEl.textContent = 'Add skein weight and length above to add by weight.'; return; }
+  } else yards = Math.round(fromInputLength(amt));
+  pendingYarnScraps.push({ id: uid(), yards });
+  document.getElementById('yf-scrap-amt').value = '';
+  resultEl.textContent = '';
+  document.getElementById('yf-scrap-list').innerHTML = buildPendingScrapsHTML();
+}
+function removePendingScrap(id){
+  pendingYarnScraps = pendingYarnScraps.filter(c=>c.id!==id);
+  document.getElementById('yf-scrap-list').innerHTML = buildPendingScrapsHTML();
+}
+/* Scraps on a stash card: add one by weighing it, re-weigh one, or remove
+   one. Each keeps yardageRemaining in step with the scrap list. */
+async function promptScrapAmount(y, message, title){
+  const byWeight = yardsToGrams(y, 1)!=null;
+  const val = await wgPrompt(message, { title, placeholder: byWeight ? 'grams' : unitLabel(), okLabel:'Save' });
+  if(val===null) return null;
+  const n = Number(val)||0;
+  if(n<=0){ wgToast(byWeight ? 'Enter a weight in grams.' : 'Enter a length.', 'error'); return null; }
+  return byWeight ? gramsToYards(y, n) : Math.round(fromInputLength(n));
+}
+async function addScrapToYarn(id){
+  const y = STATE.yarns.find(yy=>yy.id===id);
+  if(!y) return;
+  const yards = await promptScrapAmount(y, `Weigh the leftover ball of ${yarnDisplayName(y)}.`, 'Add a scrap');
+  if(yards==null) return;
+  STATE.yarns = STATE.yarns.map(yy => yy.id===id ? { ...yy, scraps:[...yarnScraps(yy), { id: uid(), yards }], yardageRemaining:(Number(yy.yardageRemaining)||0) + yards, updatedAt:new Date().toISOString() } : yy);
+  persist();
+  wgToast(`Scrap added — ≈ ${toDisplayLength(yards)} ${unitLabel()}.`, 'success');
+  renderTab();
+}
+async function reweighScrap(id, scrapId){
+  const y = STATE.yarns.find(yy=>yy.id===id);
+  const c = y && yarnScraps(y).find(cc=>cc.id===scrapId);
+  if(!c) return;
+  const yards = await promptScrapAmount(y, `Weigh this scrap of ${yarnDisplayName(y)} (was ${scrapLabel(y, c)}).`, 'Re-weigh scrap');
+  if(yards==null) return;
+  const delta = yards - c.yards;
+  STATE.yarns = STATE.yarns.map(yy => yy.id===id ? { ...yy, scraps: yarnScraps(yy).map(cc=>cc.id===scrapId ? { ...cc, yards } : cc), yardageRemaining:(Number(yy.yardageRemaining)||0) + delta, updatedAt:new Date().toISOString() } : yy);
+  persist();
+  wgToast(`Updated — ≈ ${toDisplayLength(yards)} ${unitLabel()} in that scrap.`, 'success');
+  renderTab();
+}
+function removeScrap(id, scrapId){
+  STATE.yarns = STATE.yarns.map(yy => {
+    if(yy.id!==id) return yy;
+    const c = yarnScraps(yy).find(cc=>cc.id===scrapId);
+    if(!c) return yy;
+    return { ...yy, scraps: yarnScraps(yy).filter(cc=>cc.id!==scrapId), yardageRemaining: (Number(yy.yardageRemaining)||0) - c.yards, updatedAt:new Date().toISOString() };
+  });
+  persist();
+  renderTab();
 }
 function toggleYarnStatus(id, projectId){
   STATE.yarns = STATE.yarns.map(y => {
@@ -2114,12 +2220,12 @@ function renderYarnCard(y){
       <div class="yarn-swatch-name">
         <span class="swatch" style="background:${swatchBg}"${swatchTitle}></span>
         <div style="min-width:0;">
-          <p class="yarn-name">${esc(y.name)}${y.isScrap ? ' <span class="scrap-badge">scrap</span>' : ''}</p>
+          <p class="yarn-name">${esc(y.name)}</p>
           ${subtitle ? `<p class="yarn-sub">${subtitle}</p>` : ''}
         </div>
       </div>
       <div style="display:flex; gap:4px; flex-shrink:0;">
-        ${(Number(y.skeinWeightGrams)>0 && Number(y.skeinYardage)>0) ? `<button class="del-btn" onclick="reweighYarn('${y.id}')" aria-label="Update remaining by weight" title="Weigh what's left to update remaining length">⚖️</button>` : ''}
+        <button class="del-btn" onclick="addScrapToYarn('${y.id}')" aria-label="Add a scrap" title="Add a leftover ball (scrap) of this yarn">⚖️</button>
         <button class="del-btn" onclick="showYarnForm('${y.id}')" aria-label="Edit yarn">${ICONS.pencil}</button>
         <button class="del-btn" onclick="deleteYarn('${y.id}')" aria-label="Remove yarn">${ICONS.trash}</button>
       </div>
@@ -2129,10 +2235,11 @@ function renderYarnCard(y){
       <span>${esc(y.weightCategory||'')}</span>
     </div>
     ${y.dyeLot ? `<p class="note" style="margin:6px 0 0; font-size:0.7rem;">Dye lot ${esc(y.dyeLot)}</p>` : ''}
+    ${renderYarnScrapsLine(y)}
     <div class="yarn-bottom">
       <span>
         <input type="number" value="${toDisplayLength(y.yardageRemaining)}" onchange="changeRemaining('${y.id}', this.value)" />
-        / ${toDisplayLength(total)} ${unitLabel()} <span class="note">(${y.quantity}× ${toDisplayLength(y.skeinYardage)}${unitLabel()})</span>
+        / ${toDisplayLength(Math.max(total, Number(y.yardageRemaining)||0))} ${unitLabel()} ${Number(y.quantity)>0 ? `<span class="note">(${y.quantity}× ${toDisplayLength(y.skeinYardage)}${unitLabel()})</span>` : ''}
       </span>
       ${y.cost ? `<span class="note">$${(Number(y.cost)*y.quantity).toFixed(2)}</span>` : ''}
     </div>
@@ -2142,6 +2249,19 @@ function renderYarnCard(y){
       </button>
     </div>
     ${usageLine}
+  </div>`;
+}
+
+function renderYarnScrapsLine(y){
+  const scraps = yarnScraps(y);
+  if(!scraps.length) return '';
+  const full = fullSkeinCount(y);
+  return `<div class="scrap-line">
+    <span class="note" style="font-size:0.72rem;">${full!=null ? `${full} full skein${full===1?'':'s'} + ` : ''}${scraps.length} scrap${scraps.length===1?'':'s'}:</span>
+    <div class="scrap-chips">${scraps.map(c=>`<span class="scrap-chip">
+      <button type="button" class="scrap-chip-main" onclick="reweighScrap('${y.id}','${c.id}')" title="Re-weigh this scrap">${esc(scrapLabel(y, c))}</button>
+      <button type="button" onclick="removeScrap('${y.id}','${c.id}')" aria-label="Remove scrap" title="Remove this scrap">✕</button>
+    </span>`).join('')}</div>
   </div>`;
 }
 
@@ -2383,6 +2503,12 @@ function buildYarnPickerHTML(){
             ${(Number(y.skeinYardage)>0 && Number(y.skeinWeightGrams)>0) ? `<option value="skeins" ${_usedModeMemory[y.id]==='skeins'?'selected':''}>skeins</option><option value="grams" ${_usedModeMemory[y.id]==='grams'?'selected':''}>g</option>` : ''}
           </select>
         </label>
+        ${(Number(y.skeinYardage)>0 || yarnScraps(y).length) ? `<label style="display:flex; align-items:center; gap:4px; font-size:0.72rem; color:var(--ink-soft);">
+          from <select id="usedsrc-${y.id}" style="font-size:0.7rem; padding:2px 4px;" onchange="_usedSourceMemory['${y.id}']=this.value" title="Which ball the next amount you record comes out of">
+            <option value="new">new skein</option>
+            ${yarnScraps(y).map(c=>`<option value="${c.id}" ${_usedSourceMemory[y.id]===c.id?'selected':''}>scrap · ${esc(scrapLabel(y, c))}</option>`).join('')}
+          </select>
+        </label>` : ''}
         <span class="note" style="font-size:0.7rem; white-space:nowrap;">${toDisplayLength(remaining)} ${unitLabel()} in stash</span>
         ${shortfall>0 ? `<span class="note" style="font-size:0.7rem; color:var(--wine); white-space:nowrap;">short ${toDisplayLength(shortfall)} ${unitLabel()}</span>` : (reqNum>0 ? `<span class="note" style="font-size:0.7rem; color:var(--forest);">enough</span>` : '')}
       </div>
@@ -2448,7 +2574,15 @@ function setProjectYarnUsageYards(yarnId, yardsUsed){
   const entry = pendingProjectYarnUsage.find(u=>u.yarnId===yarnId);
   const prevVal = entry ? entry.yardageUsed : 0;
   const delta = newVal - prevVal;
-  STATE.yarns = STATE.yarns.map(y => y.id===yarnId ? { ...y, yardageRemaining:(Number(y.yardageRemaining)||0) - delta } : y);
+  // More used: take it from the ball the user picked (a new skein or a
+  // scrap). Less used (a correction): give it back to the total.
+  const srcEl = document.getElementById('usedsrc-'+yarnId);
+  const source = srcEl ? srcEl.value : 'new';
+  STATE.yarns = STATE.yarns.map(y => {
+    if(y.id!==yarnId) return y;
+    return delta>0 ? applyYarnUse(y, delta, source) : { ...y, yardageRemaining:(Number(y.yardageRemaining)||0) - delta };
+  });
+  if(source!=='new' && !yarnScraps(STATE.yarns.find(y=>y.id===yarnId)||{}).some(c=>c.id===source)) delete _usedSourceMemory[yarnId];
   if(entry) entry.yardageUsed = newVal;
   else pendingProjectYarnUsage.push({ yarnId, yardageUsed: newVal });
   persist();
@@ -2459,6 +2593,7 @@ function setProjectYarnUsageYards(yarnId, yardsUsed){
    to the yd/m preference — but held during the session so the dropdown and
    field don't snap back to length after every entry. */
 const _usedModeMemory = {};
+const _usedSourceMemory = {};   // per-yarn chosen source ('new' or a scrap id), session-only
 /* Convert canonical yards to the value shown in a given entry mode. */
 function yardsToUsedEntry(yards, mode, yarn){
   const y = Number(yards)||0;

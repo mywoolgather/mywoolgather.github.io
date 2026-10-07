@@ -127,6 +127,29 @@
     ok('UK dc hint → US sc', crochetTermHint('dc','uk').startsWith('UK dc = US sc'));
   }catch(e){ ok('gauge helpers block threw: '+e.message, false); }
 
+  // --- Scraps: migration + recording usage from a new skein or a scrap ---
+  try{
+    const base = { skeinYardage:220, skeinWeightGrams:100, quantity:3 };
+    const legacy = normalizeLegacyYarn({ ...base, yardageRemaining:500 });     // 2 full + 60 yd partial
+    ok('migration: 500 of 3×220 → one 60 yd scrap', legacy.scraps.length===1 && legacy.scraps[0].yards===60);
+    ok('migration: whole skeins → no scraps', normalizeLegacyYarn({ ...base, yardageRemaining:660 }).scraps.length===0);
+    ok('migration: isScrap flag → scrap', normalizeLegacyYarn({ ...base, quantity:1, isScrap:true, yardageRemaining:73 }).scraps[0].yards===73);
+    ok('migration keeps existing scraps', normalizeLegacyYarn({ ...base, yardageRemaining:500, scraps:[] }).scraps.length===0);
+    const y = { ...base, yardageRemaining:660, scraps:[] };
+    const a = applyYarnUse(y, 50, 'new');
+    ok('use 50 from new skein → 170 yd scrap', a.yardageRemaining===610 && a.scraps.length===1 && a.scraps[0].yards===170);
+    ok('full skeins after → 2', fullSkeinCount(a)===2);
+    const b = applyYarnUse(a, 30, a.scraps[0].id);
+    ok('use 30 from that scrap → 140', b.scraps[0].yards===140 && b.yardageRemaining===580);
+    const c = applyYarnUse(b, 140, b.scraps[0].id);
+    ok('scrap used up disappears', c.scraps.length===0 && c.yardageRemaining===440);
+    const d = applyYarnUse(y, 300, 'new');   // opens 2 skeins: 440 − 300 = 140 left
+    ok('use 300 from new → 140 yd scrap', d.scraps[0].yards===140 && fullSkeinCount(d)===1);
+    const e = applyYarnUse({ ...base, yardageRemaining:485, scraps:[{id:'s',yards:45}] }, 50, 's');
+    ok('overflowing a scrap opens a new skein', e.yardageRemaining===435 && e.scraps.length===1 && e.scraps[0].yards===215);
+    ok('grams ↔ yards', gramsToYards(base, 33)===73 && yardsToGrams(base, 73)===33);
+  }catch(e){ ok('scraps block threw: '+e.message, false); }
+
   // --- closenessPercent monotonic ---
   try{
     ok('closeness identical = 100', closenessPercent(0) === 100);
