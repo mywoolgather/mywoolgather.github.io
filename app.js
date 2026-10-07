@@ -32,7 +32,19 @@ function weightLabel(name){
    (dropdown, matching, OCR). Any yarn saved with the old value is
    normalized on load so it keeps matching and displaying correctly. */
 function normalizeLegacyYarn(y){
-  if(y && y.weightCategory === 'Aran') return { ...y, weightCategory: 'Worsted' };
+  if(!y) return y;
+  if(y.weightCategory === 'Aran') y = { ...y, weightCategory: 'Worsted' };
+  // Scraps: before partial balls were tracked individually, a yarn was either
+  // flagged isScrap or simply had a remaining length that wasn't a whole
+  // number of skeins. Turn that leftover part into one scrap so it can be
+  // re-weighed and picked from when recording project usage.
+  if(!Array.isArray(y.scraps)){
+    const sy = Number(y.skeinYardage)||0, rem = Number(y.yardageRemaining)||0;
+    let part = 0;
+    if(sy>0 && rem>0) part = (y.isScrap && rem<sy) ? rem : Math.round(rem % sy);
+    else if(y.isScrap && rem>0) part = rem;
+    y = { ...y, scraps: part>=1 && (sy===0 || part<sy) ? [{ id: uid(), yards: Math.round(part) }] : [] };
+  }
   return y;
 }
 const STATUSES = ["Planned","WIP","Finished","Frogged"];
@@ -69,7 +81,7 @@ function wrapFormForMobile(innerHTML, title, saveCall, cancelCall){
 }
 /* Lock/unlock background scroll when a full-screen form is showing. */
 function syncFormScrollLock(){
-  const anyFormOpen = (STATE.showYarnForm || STATE.showProjectForm) && isMobile();
+  const anyFormOpen = (STATE.showYarnForm || STATE.showProjectForm || STATE.showPatternForm) && isMobile();
   document.body.classList.toggle('form-open', anyFormOpen);
 }
 
@@ -132,19 +144,31 @@ let STATE = {
   stashFilterFiber: 'All fibers',
   stashFilterScrap: 'all',
   gauge: {            // standalone gauge calculator inputs (session-held)
-    craft:'knit', stitchType:'', needleSize:'',
-    measUnit:'in', measSize:4,
-    sts:'', rows:'',
-    targetSts:'', targetRows:''
+    craft:'knit', terms:'us', stitchType:'', needleSize:'',
+    measUnit:'in',
+    sts:'', swW:4,          // stitches counted across a measured width
+    rows:'', swH:4,         // rows counted down a measured height
+    targetSts:'', targetRows:'', patSts:'', patRows:'',   // pattern gauge + counts to convert
+    sizeW:'', sizeL:'', multiple:'', multPlus:'',         // size → stitches/rows
+    shapeSts:'', shapeN:'', shapeKind:'inc',              // even increases/decreases
+    open:{ size:true }
   },
   stashSort: 'recent',
+  patterns: [],                   // pattern library
+  orderImport: null,              // { items|null, store, date } while importing an order
+  showPatternForm: false,
+  editingPatternId: null,
+  patternSearch: '',
+  patternFilterStatus: 'all',
+  patternFilterCraft: 'all',
+  patternSort: 'recent',
   projFilterStatus: 'All statuses',
   projSort: 'recent',
 };
 let pendingColorHex = '#5C3A72';
 let extractedSwatches = [];
 let pendingYarnIsMulticolor = false;
-let _pendingScrapRemaining = null;   // weight-computed remaining length, applied on save
+let pendingYarnScraps = [];   // scraps being edited in the yarn form ({id, yards})
 let pendingYarnColors = [];
 let pendingYarnPrimaryIndex = 0;
 let pendingYarnMatchMode = 'simple'; // 'simple' | 'full' — only meaningful for 2-3 color yarns
@@ -169,7 +193,7 @@ let statusChartInstance = null;
 async function persist(){
   if(!STATE.user) return;
   try{
-    await window.FB.saveUserData(STATE.user.uid, { yarns: STATE.yarns, projects: STATE.projects, palettes: STATE.paletteSavedPalettes, shoppingList: STATE.shoppingList, prefs: {unitPref: STATE.unitPref, theme: STATE.theme,   preferencesSetup: true} });
+    await window.FB.saveUserData(STATE.user.uid, { yarns: STATE.yarns, projects: STATE.projects, palettes: STATE.paletteSavedPalettes, shoppingList: STATE.shoppingList, patterns: STATE.patterns, prefs: {unitPref: STATE.unitPref, theme: STATE.theme, preferencesSetup: true, stashSort: STATE.stashSort, projSort: STATE.projSort, patternSort: STATE.patternSort} });
   }catch(e){
     console.error('Save failed', e);
     wgToast("Couldn't save to your account — check your connection and try again.", "error");
@@ -212,7 +236,7 @@ function flushPending(){
    only; not persisted to the account. */
 let _formSnapshot = null;
 function snapshotOpenForm(){
-  if(!(STATE.showYarnForm || STATE.showProjectForm || STATE.showShoppingForm)) { _formSnapshot = null; return; }
+  if(!(STATE.showYarnForm || STATE.showProjectForm || STATE.showShoppingForm || STATE.showPatternForm)) { _formSnapshot = null; return; }
   const form = document.querySelector('#inner-tab-content form, .fullscreen-form form');
   if(!form) return;
   const snap = {};
@@ -260,6 +284,17 @@ async function loadPresetsFromFirestore(){
 ================================================================= */
 function uid(){ return (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : String(Math.random()).slice(2); }
 function todayStr(){ return new Date().toISOString().slice(0,10); }
+/* After any save, jump back to the top of the page so the user lands on the
+   list (where a new entry shows first under the default "Newest" sort) rather
+   than wherever the long form left the scroll position. */
+function scrollToTop(){
+  requestAnimationFrame(()=> window.scrollTo({ top:0, behavior:'auto' }));
+}
+function setSort(key, value){
+  STATE[key] = value;
+  renderTab();
+  persist();   // sort choice is remembered on the account
+}
 function daysBetween(a,b){ const d = Math.round((new Date(b) - new Date(a)) / 86400000); return Number.isFinite(d) ? d : null; }
 function esc(s){ return (s==null?'':String(s)).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
@@ -322,7 +357,58 @@ function wgPrompt(message, { title='', defaultValue='', okLabel='Save', placehol
     bd.onclick = (e)=>{ if(e.target===bd) close(null); };
   });
 }
-function yarnTotalYardage(y){ return (Number(y.skeinYardage)||0) * (Number(y.quantity)||1); }
+function yarnTotalYardage(y){ return (Number(y.skeinYardage)||0) * (Number(y.quantity)||0); }
+/* Scraps / partial balls. yardageRemaining stays the yarn's total on hand;
+   `scraps` lists the partial balls inside that total, so
+       full-skein length = yardageRemaining − sum(scraps).
+   Several scraps of one colorway live on the same entry. */
+function yarnScraps(y){ return (y && Array.isArray(y.scraps)) ? y.scraps : []; }
+function scrapYards(y){ return yarnScraps(y).reduce((s,c)=>s+(Number(c.yards)||0), 0); }
+function fullYards(y){ return Math.max(0, (Number(y.yardageRemaining)||0) - scrapYards(y)); }
+function fullSkeinCount(y){
+  const sy = Number(y.skeinYardage)||0;
+  return sy>0 ? Math.round(fullYards(y)/sy*10)/10 : null;
+}
+function yardsToGrams(y, yards){
+  const sg = Number(y.skeinWeightGrams)||0, sy = Number(y.skeinYardage)||0;
+  return sg>0 && sy>0 ? Math.round(yards/sy*sg) : null;
+}
+function gramsToYards(y, grams){
+  const sg = Number(y.skeinWeightGrams)||0, sy = Number(y.skeinYardage)||0;
+  return sg>0 && sy>0 ? Math.round(grams/sg*sy) : null;
+}
+function scrapLabel(y, c){
+  const g = yardsToGrams(y, c.yards);
+  return g!=null ? `${g} g` : `${toDisplayLength(c.yards)} ${unitLabel()}`;
+}
+/* Record `yards` used from a yarn, taken from `source`: 'new' (open fresh
+   skeins — whatever's left of the last one opened becomes a new scrap) or a
+   scrap id (that scrap shrinks; once used up it disappears). Pure: returns
+   the updated yarn. */
+function applyYarnUse(y, yards, source){
+  yards = Math.max(0, Math.round(Number(yards)||0));
+  let scraps = yarnScraps(y).map(c=>({ ...c }));
+  if(source && source!=='new'){
+    const c = scraps.find(cc=>cc.id===source);
+    const have = c ? (Number(c.yards)||0) : 0;
+    if(c && yards > have){
+      // Finished the scrap and kept going: the rest comes from a new skein.
+      const rest = { ...y, scraps: scraps.filter(cc=>cc.id!==source), yardageRemaining:(Number(y.yardageRemaining)||0) - have };
+      return applyYarnUse(rest, yards - have, 'new');
+    }
+    if(c) c.yards = have - yards;
+    scraps = scraps.filter(cc=>cc.yards>0);
+  } else {
+    const sy = Number(y.skeinYardage)||0, full = fullYards(y);
+    const take = Math.min(yards, full);
+    if(sy>0 && take>0){
+      const opened = Math.ceil(take/sy);
+      const leftover = Math.round(Math.min(opened*sy, full) - take);
+      if(leftover>0) scraps.push({ id: uid(), yards: leftover });
+    }
+  }
+  return { ...y, scraps, yardageRemaining: (Number(y.yardageRemaining)||0) - yards };
+}
 /* Length units. Storage is always canonical yards; these convert only at the
    display/input edges based on the user's preference. */
 const YD_PER_M = 1.0936133;
@@ -735,6 +821,7 @@ const ICONS = {
   package: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/></svg>',
   link: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h6"/></svg>',
   pencil: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>',
+  book: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5z"/><path d="M4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5"/></svg>',
   bookmark: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12a1 1 0 0 1 1 1v17l-7-4-7 4V4a1 1 0 0 1 1-1z"/></svg>',
   image: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>',
   dots: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="5" cy="12" r="0.6"/><circle cx="12" cy="12" r="0.6"/><circle cx="19" cy="12" r="0.6"/></svg>',
@@ -755,6 +842,7 @@ function tabRegistry(){
     { id:'overview', label:'Overview', icon:ICONS.clipboard, primary:true },
     { id:'stash', label:'Stash', icon:ICONS.package, primary:true, addLabel:'Add yarn' },
     { id:'projects', label:'Projects', icon:ICONS.sparkles, primary:true, addLabel:'Add project' },
+    { id:'patterns', label:'Patterns', icon:ICONS.book, addLabel:'Add pattern' },
     { id:'palette', label:'Palette lab', icon:ICONS.palette },
     { id:'showcase', label:'Showcase', icon:ICONS.image, addLabel:'Add project' },
     { id:'shopping', label:'Shopping list', icon:ICONS.cart },
@@ -801,8 +889,8 @@ function render(){
   const headerRight = window.WG_DEMO
     ? `<div class="header-actions">
          <span class="note">You're viewing a demo</span>
-         <a class="btn btn-primary btn-small" href="${window.WG_SIGNUP_URL || '/woolgather.html'}">Create your gathering</a>
-         <a class="btn btn-ghost btn-small" href="${window.WG_SIGNUP_URL || '/woolgather.html'}">Log in</a>
+         <a class="btn btn-primary btn-small" href="${window.WG_SIGNUP_URL || '/'}">Create your gathering</a>
+         <a class="btn btn-ghost btn-small" href="${window.WG_SIGNUP_URL || '/'}">Log in</a>
        </div>`
     : `<div class="header-actions">
          <span class="note">${esc(STATE.user.displayName || STATE.user.email || 'Signed in')}</span>
@@ -846,7 +934,7 @@ function renderFab(tabs){
   if(!STATE.online) return '';   // read-only when offline — no add button
   const current = tabs.find(t=>t.id===STATE.tab);
   if(!current || !current.addLabel) return '';
-  const action = current.id==='stash' ? 'showYarnForm()' : 'showProjectForm()';
+  const action = current.id==='stash' ? 'showYarnForm()' : current.id==='patterns' ? 'showPatternForm()' : 'showProjectForm()';
   return `<button class="fab" onclick="${action}" aria-label="${esc(current.addLabel)}">${ICONS.plus}</button>`;
 }
 
@@ -885,8 +973,8 @@ function renderSettingsSheet(){
         <div class="sheet-handle"></div>
         <p style="padding:2px 22px 10px; font-family:'Fraunces',serif; font-weight:600;">You're exploring the demo</p>
         <p class="note" style="padding:0 22px 12px;">Everything here is sample data — changes reset on refresh. Create a free account to build your own stash.</p>
-        <a class="btn btn-primary" style="margin:0 22px 8px; display:block; text-align:center;" href="${window.WG_SIGNUP_URL || '/woolgather.html'}">Sign up free</a>
-        <a class="btn btn-ghost" style="margin:0 22px 12px; display:block; text-align:center;" href="${window.WG_SIGNUP_URL || '/woolgather.html'}">Log in</a>
+        <a class="btn btn-primary" style="margin:0 22px 8px; display:block; text-align:center;" href="${window.WG_SIGNUP_URL || '/'}">Sign up free</a>
+        <a class="btn btn-ghost" style="margin:0 22px 12px; display:block; text-align:center;" href="${window.WG_SIGNUP_URL || '/'}">Log in</a>
         <div class="sheet-divider"></div>
         <button onclick="closeSettings(); openTipJar();">💛<span>Support the developer</span></button>
         <button onclick="closeSettings(); openAbout();">${ICONS.gear}<span>About Woolgather</span></button>
@@ -911,6 +999,8 @@ function renderSettingsSheet(){
           </div>
         </div>
         <button onclick="window.FB.signOutUser()">${ICONS.reset}<span>Sign out</span></button>
+        <button onclick="closeSettings(); exportStash('json');">${ICONS.package}<span>Back up my data (JSON)</span></button>
+        <button onclick="closeSettings(); exportStash('csv');">${ICONS.package}<span>Export stash (CSV)</span></button>
         <button onclick="closeSettings(); resetAll();" class="danger-text">${ICONS.trash}<span>Clear my data</span></button>
         <div class="sheet-divider"></div>
         <button onclick="closeSettings(); openTipJar();">💛<span>Support the developer</span></button>
@@ -1115,6 +1205,7 @@ async function startDeleteAccount(){
     // app holds their URLs; the auth-user teardown can't reach them after).
     const photoUrls = [];
     STATE.projects.forEach(p => (p.photos||[]).forEach(u => photoUrls.push(u)));
+    STATE.patterns.forEach(p => (p.files||[]).forEach(f => photoUrls.push(f.url)));
     for(const url of photoUrls){ try{ await window.FB.deletePhoto(url); }catch(e){} }
     await window.FB.deleteAccount();
     wgToast('Your account has been deleted.', 'success');
@@ -1239,6 +1330,7 @@ function renderTab(){
   if(STATE.tab==='overview') el.innerHTML = renderOverview();
   else if(STATE.tab==='stash') el.innerHTML = renderStash();
   else if(STATE.tab==='projects') el.innerHTML = renderProjects();
+  else if(STATE.tab==='patterns') el.innerHTML = renderPatterns();
   else if(STATE.tab==='palette') el.innerHTML = renderPalette();
   else if(STATE.tab==='showcase') el.innerHTML = renderShowcase();
   else if(STATE.tab==='shopping') el.innerHTML = renderShopping();
@@ -1246,7 +1338,6 @@ function renderTab(){
   else if(STATE.tab==='presets') el.innerHTML = renderPresetsAdmin();
 
   if(STATE.tab==='overview') renderCharts();
-  if(STATE.tab==='stash' && STATE.showYarnForm) wireBrandSelectors();
   syncFormScrollLock();
 }
 
@@ -1299,10 +1390,17 @@ function computeStats(){
 
 function renderOverview(){
   if(STATE.yarns.length===0 && STATE.projects.length===0){
-    return `<div class="empty">
+    return `<div class="empty" style="max-width:560px; margin:0 auto;">
       <p class="title">Welcome to Woolgather 🧶</p>
-      <p class="body">Your quiet ledger for yarn, projects, and palettes. Start by logging a skein or two — then the dashboard, palette matching, and shopping tools all come to life. Everything saves to your account and syncs across your devices.</p>
-      <button class="btn btn-primary" onclick="switchTab('stash')">${ICONS.plus} Add your first yarn</button>
+      <p class="body">Your quiet ledger for yarn, projects, and palettes — no ads, no AI, just a calm place to track your craft. Here's what you can do:</p>
+      <div class="onboard-grid">
+        <div class="onboard-card"><span class="onboard-icon">${ICONS.package}</span><strong>Log your stash</strong><span class="note">Yarn, colors, and how much you have left. Scan a label to autofill, or weigh a scrap to log leftovers.</span></div>
+        <div class="onboard-card"><span class="onboard-icon">${ICONS.sparkles}</span><strong>Track projects</strong><span class="note">Link yarn, count rows, note your gauge, and see finished makes in the Showcase.</span></div>
+        <div class="onboard-card"><span class="onboard-icon">${ICONS.palette}</span><strong>Match colors</strong><span class="note">The Palette Lab uses real color science to find harmonies in your stash — or colors to shop for.</span></div>
+        <div class="onboard-card"><span class="onboard-icon">${ICONS.cart}</span><strong>Plan &amp; shop</strong><span class="note">Turn project gaps into a shopping list, and check gauge before you cast on.</span></div>
+      </div>
+      <button class="btn btn-primary" style="margin-top:18px;" onclick="switchTab('stash')">${ICONS.plus} Add your first yarn</button>
+      <p class="note" style="margin-top:10px;">Everything saves to your account and syncs across your devices.</p>
     </div>`;
   }
   const s = computeStats();
@@ -1370,8 +1468,12 @@ function renderCharts(){
 function renderStash(){
   let html = `<div class="row-between mb-4">
     <p class="note">${STATE.yarns.length} skein${STATE.yarns.length===1?'':'s'} logged</p>
-    ${!STATE.showYarnForm ? `<button class="btn btn-primary" onclick="showYarnForm()">${ICONS.plus} Add yarn</button>` : ''}
+    ${!STATE.showYarnForm ? `<div class="row">
+      ${STATE.online && !STATE.orderImport ? `<button class="btn btn-ghost" onclick="openOrderImport()">${ICONS.upload} Import order</button>` : ''}
+      <button class="btn btn-primary" onclick="showYarnForm()">${ICONS.plus} Add yarn</button>
+    </div>` : ''}
   </div>`;
+  if(STATE.orderImport && !STATE.showYarnForm) html += renderOrderImport();
   if(STATE.showYarnForm) html += renderYarnForm();
   if(STATE.yarns.length===0){
     html += `<div class="empty"><p class="title">Your stash is empty</p><p class="body">Log a skein — its color, fiber, and yardage — and it'll start showing up across the app.</p></div>`;
@@ -1391,11 +1493,11 @@ function renderStash(){
       <select onchange="STATE.stashFilterFiber=this.value; renderTab();">
         ${fiberCats.map(f=>`<option ${(STATE.stashFilterFiber||'All fibers')===f?'selected':''}>${f}</option>`).join('')}
       </select>
-      ${STATE.yarns.some(y=>y.isScrap) ? `<select onchange="STATE.stashFilterScrap=this.value; renderTab();">
-        ${[['all','All yarn'],['scrap','Scraps only'],['full','Full skeins only']].map(([v,l])=>`<option value="${v}" ${(STATE.stashFilterScrap||'all')===v?'selected':''}>${l}</option>`).join('')}
+      ${STATE.yarns.some(y=>yarnScraps(y).length) ? `<select onchange="STATE.stashFilterScrap=this.value; renderTab();">
+        ${[['all','All yarn'],['scrap','Has scraps'],['full','Has full skeins']].map(([v,l])=>`<option value="${v}" ${(STATE.stashFilterScrap||'all')===v?'selected':''}>${l}</option>`).join('')}
       </select>` : ''}
-      <select onchange="STATE.stashSort=this.value; renderTab();">
-        ${[['recent','Newest'],['name','Name A–Z'],['yardage','Most yarn'],['color','Color']].map(([v,l])=>`<option value="${v}" ${(STATE.stashSort||'recent')===v?'selected':''}>${l}</option>`).join('')}
+      <select onchange="setSort('stashSort', this.value)" aria-label="Sort stash">
+        ${[['recent','Newest'],['updated','Recently updated'],['name','Name A–Z'],['color','Color'],['weight','Weight (light → heavy)'],['yardage','Most yarn left']].map(([v,l])=>`<option value="${v}" ${(STATE.stashSort||'recent')===v?'selected':''}>${l}</option>`).join('')}
       </select>
     </div>`;
   }
@@ -1422,6 +1524,10 @@ function setStashSearch(v){
     grid.innerHTML = shown.map(renderYarnCard).join('');
   }
 }
+function weightRank(w){ const i = WEIGHTS.indexOf(w); return i<0 ? 99 : i; }
+// Last-edited stamp for "Recently updated"; entries saved before this existed
+// fall back to the date they were added.
+function updatedKey(x){ return x.updatedAt || x.dateAdded || x.createdAt || ''; }
 function filteredSortedYarns(){
   let list = [...STATE.yarns];
   const q = (STATE.stashSearch||'').toLowerCase().trim();
@@ -1433,11 +1539,13 @@ function filteredSortedYarns(){
   const ff = STATE.stashFilterFiber;
   if(ff && ff!=='All fibers') list = list.filter(y=>categorizeFiber(y.fiber)===ff);
   const fs = STATE.stashFilterScrap;
-  if(fs==='scrap') list = list.filter(y=>y.isScrap);
-  else if(fs==='full') list = list.filter(y=>!y.isScrap);
+  if(fs==='scrap') list = list.filter(y=>yarnScraps(y).length>0);
+  else if(fs==='full') list = list.filter(y=>{ const sy=Number(y.skeinYardage)||0; return sy>0 ? fullYards(y)>=sy-0.5 : fullYards(y)>0; });
   const sort = STATE.stashSort || 'recent';
   if(sort==='name') list.sort((a,b)=>yarnDisplayName(a).localeCompare(yarnDisplayName(b)));
-  else if(sort==='yardage') list.sort((a,b)=>yarnTotalYardage(b)-yarnTotalYardage(a));
+  else if(sort==='yardage') list.sort((a,b)=>(Number(b.yardageRemaining)||0)-(Number(a.yardageRemaining)||0));
+  else if(sort==='weight') list.sort((a,b)=>weightRank(a.weightCategory)-weightRank(b.weightCategory) || yarnDisplayName(a).localeCompare(yarnDisplayName(b)));
+  else if(sort==='updated') list.sort((a,b)=>updatedKey(b).localeCompare(updatedKey(a)));
   else if(sort==='color') list.sort((a,b)=>hexToHsl(a.colorHex||'#000').h - hexToHsl(b.colorHex||'#000').h);
   else list.reverse(); // recent = newest first (added order reversed)
   return list;
@@ -1451,7 +1559,7 @@ function showYarnForm(id){
   pendingColorHex = editing ? editing.colorHex : '#5C3A72';
   extractedSwatches = [];
   pendingYarnIsMulticolor = !!(editing && editing.isMulticolor);
-  _pendingScrapRemaining = null;   // reset any weight-computed remaining from a prior open
+  pendingYarnScraps = editing ? yarnScraps(editing).map(c=>({ ...c })) : [];
   pendingYarnColors = editing && editing.colors ? [...editing.colors] : [];
   pendingYarnPrimaryIndex = editing && typeof editing.primaryIndex === 'number' ? editing.primaryIndex : 0;
   pendingYarnMatchMode = editing && editing.matchMode ? editing.matchMode : 'simple';
@@ -1517,16 +1625,20 @@ function renderYarnForm(){
       <input id="yf-skeinyardage" type="number" min="0" placeholder="220" value="${editing ? toDisplayLength(editing.skeinYardage) : ''}" />
     </label>
 
-    <label class="field">Quantity (skeins)
-      <input id="yf-quantity" type="number" min="0" step="any" placeholder="1.5" value="${editing ? esc(editing.quantity) : 1}" />
+    <label class="field">Full skeins
+      <input id="yf-quantity" type="number" min="0" step="1" placeholder="1" value="${editing ? esc(editing.quantity) : 1}" />
+      <span class="note" style="font-size:0.7rem;">Only have scraps? Enter 0 and add them below.</span>
     </label>
-    <div class="field span2" style="background:rgba(255,255,255,0.4); border:1px dashed var(--border); border-radius:8px; padding:10px;">
-      <span class="note" style="display:block; margin-bottom:6px;">Only have a partial ball? Weigh it and compute what's left. Needs skein weight + length above.</span>
-      <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-        <label style="display:flex; align-items:center; gap:4px; font-size:0.78rem; color:var(--ink-soft);">
-          Current weight <input id="yf-scrapgrams" type="number" min="0" step="any" placeholder="33" style="width:70px;" /> g
-        </label>
-        <button type="button" class="btn btn-ghost btn-small" onclick="computeRemainingFromWeight()">Compute remaining</button>
+    <div class="span2 scrap-editor">
+      <span class="note" style="display:block; margin-bottom:6px;">Scraps / partial balls — add each leftover ball of this colorway. Weigh it (needs skein weight + length above) or enter its length.</span>
+      <div id="yf-scrap-list">${buildPendingScrapsHTML()}</div>
+      <div class="row mt-2">
+        <input id="yf-scrap-amt" type="number" min="0" step="any" placeholder="33" style="width:80px;" aria-label="Scrap amount" />
+        <select id="yf-scrap-unit" aria-label="Scrap unit">
+          <option value="g">g</option>
+          <option value="len">${unitLabel()}</option>
+        </select>
+        <button type="button" class="btn btn-ghost btn-small" onclick="addPendingScrap()">${ICONS.plus} Add scrap</button>
         <span id="yf-scrap-result" class="note" style="font-size:0.72rem;"></span>
       </div>
     </div>
@@ -1541,11 +1653,6 @@ function renderYarnForm(){
     <label class="field span2" style="flex-direction:row; align-items:center; justify-content:flex-start; gap:8px; text-align:left;">
       <input type="checkbox" id="yf-multicolor" ${pendingYarnIsMulticolor?'checked':''} onchange="toggleMulticolor(this.checked)" style="width:auto; flex-shrink:0;" />
       <span class="muted-ink">This yarn is multicolor (variegated / self-striping / speckled)</span>
-    </label>
-
-    <label class="field span2" style="flex-direction:row; align-items:center; justify-content:flex-start; gap:8px; text-align:left;">
-      <input type="checkbox" id="yf-scrap" ${editing && editing.isScrap ? 'checked':''} style="width:auto; flex-shrink:0;" />
-      <span class="muted-ink">This is a scrap / leftover (partial ball)</span>
     </label>
 
     <div class="span2" id="yf-color-section" style="display:flex; flex-wrap:wrap; align-items:center; gap:14px;">
@@ -1924,34 +2031,39 @@ function handleSaveYarn(e){
     weightCategory: document.getElementById('yf-weightcat').value,
     skeinWeightGrams: Number(document.getElementById('yf-skeinweight').value) || 0,
     skeinYardage: fromInputLength(document.getElementById('yf-skeinyardage').value) || 0,
-    quantity: Number(document.getElementById('yf-quantity').value) || 1,
+    quantity: document.getElementById('yf-quantity').value==='' ? 1 : Math.max(0, Number(document.getElementById('yf-quantity').value)||0),
     // (accepts decimals like 1.5 for partial/scrap skeins)
     cost: document.getElementById('yf-cost').value === '' ? null : Number(document.getElementById('yf-cost').value),
     purchaseDate: document.getElementById('yf-purchasedate').value || null,
     isMulticolor: multicolor,
-    isScrap: !!(document.getElementById('yf-scrap') && document.getElementById('yf-scrap').checked),
     colors: multicolor ? [...pendingYarnColors] : [],
     primaryIndex: primaryIndex,
     matchMode: multicolor && pendingYarnColors.length<=3 ? pendingYarnMatchMode : 'simple',
     colorHex: multicolor ? pendingYarnColors[primaryIndex] : pendingColorHex
   };
 
-  // If the user computed a remaining length by weight, honor it as the
-  // current remaining (overrides the default "full skeins" amount).
-  const scrapRemaining = _pendingScrapRemaining;
-  _pendingScrapRemaining = null;
+  // Scraps edited in the form. On edit, the total on hand moves by however
+  // much the scraps changed; a new yarn starts with its full skeins + scraps.
+  const scraps = pendingYarnScraps.filter(c=>c.yards>0).map(c=>({ ...c }));
+  const newScrapYd = scraps.reduce((t,c)=>t+c.yards, 0);
+  pendingYarnScraps = [];
 
   if(STATE.editingYarnId){
-    STATE.yarns = STATE.yarns.map(y => y.id===STATE.editingYarnId ? { ...y, ...fields, ...(scrapRemaining!=null?{yardageRemaining:scrapRemaining}:{}) } : y);
+    STATE.yarns = STATE.yarns.map(y => y.id===STATE.editingYarnId ? {
+      ...y, ...fields, scraps,
+      yardageRemaining: (Number(y.yardageRemaining)||0) - scrapYards(y) + newScrapYd,
+      updatedAt: new Date().toISOString()
+    } : y);
   } else {
-    const yarn = { id: uid(), ...fields, status:'available', allocatedTo:null, dateAdded: todayStr() };
-    yarn.yardageRemaining = scrapRemaining!=null ? scrapRemaining : yarnTotalYardage(yarn);
+    const yarn = { id: uid(), ...fields, scraps, status:'available', allocatedTo:null, dateAdded: todayStr(), updatedAt: new Date().toISOString() };
+    yarn.yardageRemaining = yarnTotalYardage(yarn) + newScrapYd;
     STATE.yarns.push(yarn);
   }
   persist();
   STATE.showYarnForm = false;
   STATE.editingYarnId = null;
   renderTab();
+  scrollToTop();
 }
 
 async function deleteYarn(id){
@@ -1960,48 +2072,127 @@ async function deleteYarn(id){
   persist();
   renderTab();
 }
-/* Re-weigh an existing stash yarn: enter the current weight on a scale and
-   update its remaining length via the skein ratio. For after you've used some
-   of a ball and want an accurate remaining figure without guessing. */
-async function reweighYarn(id){
-  const y = STATE.yarns.find(yy=>yy.id===id);
-  if(!y) return;
-  const skeinG = Number(y.skeinWeightGrams)||0, skeinYd = Number(y.skeinYardage)||0;
-  if(!skeinG || !skeinYd){ wgToast('This yarn needs skein weight & length recorded first.', 'error'); return; }
-  const val = await wgPrompt(`Weigh what's left of ${yarnDisplayName(y)} and enter its current weight.`, { title:'Update remaining by weight', placeholder:'grams', okLabel:'Update' });
-  if(val===null) return;
-  const grams = Number(val)||0;
-  if(grams<=0){ wgToast('Enter a weight in grams.', 'error'); return; }
-  const remainingYd = Math.round((grams / skeinG) * skeinYd);
-  STATE.yarns = STATE.yarns.map(yy => yy.id===id ? { ...yy, yardageRemaining: remainingYd } : yy);
-  persist();
-  wgToast(`Updated — ≈ ${toDisplayLength(remainingYd)} ${unitLabel()} left.`, 'success');
-  renderTab();
-}
 function changeRemaining(id, val){
   const n = val==='' ? 0 : fromInputLength(val);
   STATE.yarns = STATE.yarns.map(y => y.id===id ? {...y, yardageRemaining:n} : y);
   persist();
 }
-/* Scrap helper: compute remaining LENGTH from a current weight, using the
-   per-skein ratio (length/weight). Reads the form's skein-weight & length,
-   stashes the result in _pendingScrapRemaining (applied on save), and shows
-   a confirmation. Needs both skein specs; otherwise explains what's missing. */
-function computeRemainingFromWeight(){
-  const gramsEl = document.getElementById('yf-scrapgrams');
-  const resultEl = document.getElementById('yf-scrap-result');
-  const grams = Number(gramsEl && gramsEl.value) || 0;
-  const skeinG = Number(document.getElementById('yf-skeinweight').value) || 0;
-  // skein length is entered in display units; convert to canonical yards.
-  const skeinYd = fromInputLength(document.getElementById('yf-skeinyardage').value) || 0;
-  if(!grams){ if(resultEl) resultEl.textContent = 'Enter the current weight first.'; return; }
-  if(!skeinG || !skeinYd){ if(resultEl) resultEl.textContent = 'Add skein weight and length above to compute.'; return; }
-  const remainingYd = Math.round((grams / skeinG) * skeinYd);
-  _pendingScrapRemaining = remainingYd;
-  if(resultEl){
-    resultEl.classList.add('ok-text');
-    resultEl.textContent = `≈ ${toDisplayLength(remainingYd)} ${unitLabel()} left — saved when you save this yarn.`;
+/* Export / backup. JSON = complete backup of everything (re-importable later);
+   CSV = the stash as a flat, spreadsheet-friendly table. Both download client-
+   side via a Blob — no server involved. */
+function downloadFile(filename, text, mime){
+  const blob = new Blob([text], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url), 1000);
+}
+function exportStash(format){
+  const stamp = todayStr();
+  if(format==='json'){
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      app: 'Woolgather',
+      yarns: STATE.yarns,
+      projects: STATE.projects,
+      palettes: STATE.paletteSavedPalettes,
+      shoppingList: STATE.shoppingList,
+      patterns: STATE.patterns
+    };
+    downloadFile(`woolgather-backup-${stamp}.json`, JSON.stringify(payload, null, 2), 'application/json');
+    wgToast('Backup downloaded.', 'success');
+    return;
   }
+  // CSV — stash only, flat and readable.
+  const cols = ['Brand','Line','Colorway','Colorway #','Dye lot','Fiber','Weight','Skein weight (g)','Length/skein','Quantity','Length remaining','Unit','Cost/skein','Scraps','Status'];
+  const csvEsc = (v)=>{ const s=(v==null?'':String(v)); return /[",\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s; };
+  const rows = STATE.yarns.map(y=>[
+    y.brand, y.line, y.colorway, y.colorwayNumber, y.dyeLot, y.fiber, y.weightCategory,
+    y.skeinWeightGrams, toDisplayLength(y.skeinYardage), y.quantity,
+    toDisplayLength(y.yardageRemaining), unitLabel(), y.cost, yarnScraps(y).map(c=>toDisplayLength(c.yards)).join(' / '), y.status
+  ].map(csvEsc).join(','));
+  const csv = cols.join(',') + '\n' + rows.join('\n');
+  downloadFile(`woolgather-stash-${stamp}.csv`, csv, 'text/csv');
+  wgToast('Stash CSV downloaded.', 'success');
+}
+/* Yarn-form scrap editor: add/remove partial balls before saving. Weight is
+   converted to length with the skein ratio typed into the form above. */
+function formSkeinSpecs(){
+  return {
+    skeinWeightGrams: Number(document.getElementById('yf-skeinweight').value) || 0,
+    skeinYardage: fromInputLength(document.getElementById('yf-skeinyardage').value) || 0
+  };
+}
+function buildPendingScrapsHTML(){
+  if(!pendingYarnScraps.length) return `<p class="note no-margin" style="font-size:0.75rem;">No scraps.</p>`;
+  // While the form is first being built its inputs don't exist yet; use the
+  // yarn being edited for the weight ratio.
+  const specs = document.getElementById('yf-skeinweight') ? formSkeinSpecs()
+    : (STATE.yarns.find(y=>y.id===STATE.editingYarnId) || {});
+  return `<div class="scrap-chips">${pendingYarnScraps.map(c=>`<span class="scrap-chip">${esc(scrapLabel(specs, c))}
+    <button type="button" onclick="removePendingScrap('${c.id}')" aria-label="Remove scrap">✕</button></span>`).join('')}</div>`;
+}
+function addPendingScrap(){
+  const amt = Number(document.getElementById('yf-scrap-amt').value)||0;
+  const unit = document.getElementById('yf-scrap-unit').value;
+  const resultEl = document.getElementById('yf-scrap-result');
+  if(amt<=0){ resultEl.textContent = 'Enter an amount first.'; return; }
+  let yards;
+  if(unit==='g'){
+    yards = gramsToYards(formSkeinSpecs(), amt);
+    if(yards==null){ resultEl.textContent = 'Add skein weight and length above to add by weight.'; return; }
+  } else yards = Math.round(fromInputLength(amt));
+  pendingYarnScraps.push({ id: uid(), yards });
+  document.getElementById('yf-scrap-amt').value = '';
+  resultEl.textContent = '';
+  document.getElementById('yf-scrap-list').innerHTML = buildPendingScrapsHTML();
+}
+function removePendingScrap(id){
+  pendingYarnScraps = pendingYarnScraps.filter(c=>c.id!==id);
+  document.getElementById('yf-scrap-list').innerHTML = buildPendingScrapsHTML();
+}
+/* Scraps on a stash card: add one by weighing it, re-weigh one, or remove
+   one. Each keeps yardageRemaining in step with the scrap list. */
+async function promptScrapAmount(y, message, title){
+  const byWeight = yardsToGrams(y, 1)!=null;
+  const val = await wgPrompt(message, { title, placeholder: byWeight ? 'grams' : unitLabel(), okLabel:'Save' });
+  if(val===null) return null;
+  const n = Number(val)||0;
+  if(n<=0){ wgToast(byWeight ? 'Enter a weight in grams.' : 'Enter a length.', 'error'); return null; }
+  return byWeight ? gramsToYards(y, n) : Math.round(fromInputLength(n));
+}
+async function addScrapToYarn(id){
+  const y = STATE.yarns.find(yy=>yy.id===id);
+  if(!y) return;
+  const yards = await promptScrapAmount(y, `Weigh the leftover ball of ${yarnDisplayName(y)}.`, 'Add a scrap');
+  if(yards==null) return;
+  STATE.yarns = STATE.yarns.map(yy => yy.id===id ? { ...yy, scraps:[...yarnScraps(yy), { id: uid(), yards }], yardageRemaining:(Number(yy.yardageRemaining)||0) + yards, updatedAt:new Date().toISOString() } : yy);
+  persist();
+  wgToast(`Scrap added — ≈ ${toDisplayLength(yards)} ${unitLabel()}.`, 'success');
+  renderTab();
+}
+async function reweighScrap(id, scrapId){
+  const y = STATE.yarns.find(yy=>yy.id===id);
+  const c = y && yarnScraps(y).find(cc=>cc.id===scrapId);
+  if(!c) return;
+  const yards = await promptScrapAmount(y, `Weigh this scrap of ${yarnDisplayName(y)} (was ${scrapLabel(y, c)}).`, 'Re-weigh scrap');
+  if(yards==null) return;
+  const delta = yards - c.yards;
+  STATE.yarns = STATE.yarns.map(yy => yy.id===id ? { ...yy, scraps: yarnScraps(yy).map(cc=>cc.id===scrapId ? { ...cc, yards } : cc), yardageRemaining:(Number(yy.yardageRemaining)||0) + delta, updatedAt:new Date().toISOString() } : yy);
+  persist();
+  wgToast(`Updated — ≈ ${toDisplayLength(yards)} ${unitLabel()} in that scrap.`, 'success');
+  renderTab();
+}
+function removeScrap(id, scrapId){
+  STATE.yarns = STATE.yarns.map(yy => {
+    if(yy.id!==id) return yy;
+    const c = yarnScraps(yy).find(cc=>cc.id===scrapId);
+    if(!c) return yy;
+    return { ...yy, scraps: yarnScraps(yy).filter(cc=>cc.id!==scrapId), yardageRemaining: (Number(yy.yardageRemaining)||0) - c.yards, updatedAt:new Date().toISOString() };
+  });
+  persist();
+  renderTab();
 }
 function toggleYarnStatus(id, projectId){
   STATE.yarns = STATE.yarns.map(y => {
@@ -2046,12 +2237,12 @@ function renderYarnCard(y){
       <div class="yarn-swatch-name">
         <span class="swatch" style="background:${swatchBg}"${swatchTitle}></span>
         <div style="min-width:0;">
-          <p class="yarn-name">${esc(y.name)}${y.isScrap ? ' <span class="scrap-badge">scrap</span>' : ''}</p>
+          <p class="yarn-name">${esc(y.name)}</p>
           ${subtitle ? `<p class="yarn-sub">${subtitle}</p>` : ''}
         </div>
       </div>
       <div style="display:flex; gap:4px; flex-shrink:0;">
-        ${(Number(y.skeinWeightGrams)>0 && Number(y.skeinYardage)>0) ? `<button class="del-btn" onclick="reweighYarn('${y.id}')" aria-label="Update remaining by weight" title="Weigh what's left to update remaining length">⚖️</button>` : ''}
+        <button class="del-btn" onclick="addScrapToYarn('${y.id}')" aria-label="Add a scrap" title="Add a leftover ball (scrap) of this yarn">⚖️</button>
         <button class="del-btn" onclick="showYarnForm('${y.id}')" aria-label="Edit yarn">${ICONS.pencil}</button>
         <button class="del-btn" onclick="deleteYarn('${y.id}')" aria-label="Remove yarn">${ICONS.trash}</button>
       </div>
@@ -2061,10 +2252,11 @@ function renderYarnCard(y){
       <span>${esc(y.weightCategory||'')}</span>
     </div>
     ${y.dyeLot ? `<p class="note" style="margin:6px 0 0; font-size:0.7rem;">Dye lot ${esc(y.dyeLot)}</p>` : ''}
+    ${renderYarnScrapsLine(y)}
     <div class="yarn-bottom">
       <span>
         <input type="number" value="${toDisplayLength(y.yardageRemaining)}" onchange="changeRemaining('${y.id}', this.value)" />
-        / ${toDisplayLength(total)} ${unitLabel()} <span class="note">(${y.quantity}× ${toDisplayLength(y.skeinYardage)}${unitLabel()})</span>
+        / ${toDisplayLength(Math.max(total, Number(y.yardageRemaining)||0))} ${unitLabel()} ${Number(y.quantity)>0 ? `<span class="note">(${y.quantity}× ${toDisplayLength(y.skeinYardage)}${unitLabel()})</span>` : ''}
       </span>
       ${y.cost ? `<span class="note">$${(Number(y.cost)*y.quantity).toFixed(2)}</span>` : ''}
     </div>
@@ -2074,6 +2266,19 @@ function renderYarnCard(y){
       </button>
     </div>
     ${usageLine}
+  </div>`;
+}
+
+function renderYarnScrapsLine(y){
+  const scraps = yarnScraps(y);
+  if(!scraps.length) return '';
+  const full = fullSkeinCount(y);
+  return `<div class="scrap-line">
+    <span class="note" style="font-size:0.72rem;">${full!=null ? `${full} full skein${full===1?'':'s'} + ` : ''}${scraps.length} scrap${scraps.length===1?'':'s'}:</span>
+    <div class="scrap-chips">${scraps.map(c=>`<span class="scrap-chip">
+      <button type="button" class="scrap-chip-main" onclick="reweighScrap('${y.id}','${c.id}')" title="Re-weigh this scrap">${esc(scrapLabel(y, c))}</button>
+      <button type="button" onclick="removeScrap('${y.id}','${c.id}')" aria-label="Remove scrap" title="Remove this scrap">✕</button>
+    </span>`).join('')}</div>
   </div>`;
 }
 
@@ -2097,8 +2302,8 @@ function renderProjects(){
       <select onchange="STATE.projFilterStatus=this.value; renderTab();">
         ${['All statuses',...STATUSES].map(s=>`<option ${(STATE.projFilterStatus||'All statuses')===s?'selected':''}>${s}</option>`).join('')}
       </select>
-      <select onchange="STATE.projSort=this.value; renderTab();">
-        ${[['recent','Newest'],['name','Name A–Z'],['status','By status']].map(([v,l])=>`<option value="${v}" ${(STATE.projSort||'recent')===v?'selected':''}>${l}</option>`).join('')}
+      <select onchange="setSort('projSort', this.value)" aria-label="Sort projects">
+        ${[['recent','Newest'],['updated','Recently updated'],['name','Name A–Z'],['status','By status'],['start','Start date']].map(([v,l])=>`<option value="${v}" ${(STATE.projSort||'recent')===v?'selected':''}>${l}</option>`).join('')}
       </select>
     </div>`;
   }
@@ -2108,6 +2313,8 @@ function renderProjects(){
   const sort = STATE.projSort || 'recent';
   if(sort==='name') list.sort((a,b)=>a.name.localeCompare(b.name));
   else if(sort==='status'){ const order={WIP:0,Planned:1,Finished:2,Frogged:3}; list.sort((a,b)=>(order[a.status]??9)-(order[b.status]??9)); }
+  else if(sort==='start') list.sort((a,b)=>(b.startDate||'').localeCompare(a.startDate||''));
+  else if(sort==='updated') list.sort((a,b)=>updatedKey(b).localeCompare(updatedKey(a)));
   else list.reverse();
 
   if(list.length===0){
@@ -2139,10 +2346,14 @@ function cleanupOpenForms(){
     // to Storage during this session so nothing's left orphaned.
     pendingProjectPhotos.forEach(url => window.FB.deletePhoto(url));
   }
+  if(STATE.showPatternForm) discardPatternDraftFiles();
   STATE.showYarnForm = false;
   STATE.showProjectForm = false;
+  STATE.showPatternForm = false;
   STATE.editingYarnId = null;
   STATE.editingProjectId = null;
+  STATE.editingPatternId = null;
+  pendingProjectPatternId = null;
   pendingProjectYarnUsage = [];
   pendingProjectYarnRequired = [];
   pendingProjectPhotos = [];
@@ -2160,6 +2371,7 @@ function showProjectForm(id){
   pendingProjectYarnRequired = editing ? (editing.yarnRequired||[]).map(u=>({...u})) : [];
   pendingProjectPhotos = editing ? [...(editing.photos||[])] : [];
   pendingProjectCounters = editing ? (editing.counters||[]).map(c=>({...c})) : [];
+  pendingProjectPatternId = editing ? (editing.patternId||null) : null;
   renderTab();
 }
 function hideProjectForm(){ cleanupOpenForms(); renderTab(); }
@@ -2313,6 +2525,12 @@ function buildYarnPickerHTML(){
             ${(Number(y.skeinYardage)>0 && Number(y.skeinWeightGrams)>0) ? `<option value="skeins" ${_usedModeMemory[y.id]==='skeins'?'selected':''}>skeins</option><option value="grams" ${_usedModeMemory[y.id]==='grams'?'selected':''}>g</option>` : ''}
           </select>
         </label>
+        ${(Number(y.skeinYardage)>0 || yarnScraps(y).length) ? `<label style="display:flex; align-items:center; gap:4px; font-size:0.72rem; color:var(--ink-soft);">
+          from <select id="usedsrc-${y.id}" style="font-size:0.7rem; padding:2px 4px;" onchange="_usedSourceMemory['${y.id}']=this.value" title="Which ball the next amount you record comes out of">
+            <option value="new">new skein</option>
+            ${yarnScraps(y).map(c=>`<option value="${c.id}" ${_usedSourceMemory[y.id]===c.id?'selected':''}>scrap · ${esc(scrapLabel(y, c))}</option>`).join('')}
+          </select>
+        </label>` : ''}
         <span class="note" style="font-size:0.7rem; white-space:nowrap;">${toDisplayLength(remaining)} ${unitLabel()} in stash</span>
         ${shortfall>0 ? `<span class="note" style="font-size:0.7rem; color:var(--wine); white-space:nowrap;">short ${toDisplayLength(shortfall)} ${unitLabel()}</span>` : (reqNum>0 ? `<span class="note" style="font-size:0.7rem; color:var(--forest);">enough</span>` : '')}
       </div>
@@ -2378,7 +2596,15 @@ function setProjectYarnUsageYards(yarnId, yardsUsed){
   const entry = pendingProjectYarnUsage.find(u=>u.yarnId===yarnId);
   const prevVal = entry ? entry.yardageUsed : 0;
   const delta = newVal - prevVal;
-  STATE.yarns = STATE.yarns.map(y => y.id===yarnId ? { ...y, yardageRemaining:(Number(y.yardageRemaining)||0) - delta } : y);
+  // More used: take it from the ball the user picked (a new skein or a
+  // scrap). Less used (a correction): give it back to the total.
+  const srcEl = document.getElementById('usedsrc-'+yarnId);
+  const source = srcEl ? srcEl.value : 'new';
+  STATE.yarns = STATE.yarns.map(y => {
+    if(y.id!==yarnId) return y;
+    return delta>0 ? applyYarnUse(y, delta, source) : { ...y, yardageRemaining:(Number(y.yardageRemaining)||0) - delta };
+  });
+  if(source!=='new' && !yarnScraps(STATE.yarns.find(y=>y.id===yarnId)||{}).some(c=>c.id===source)) delete _usedSourceMemory[yarnId];
   if(entry) entry.yardageUsed = newVal;
   else pendingProjectYarnUsage.push({ yarnId, yardageUsed: newVal });
   persist();
@@ -2389,6 +2615,7 @@ function setProjectYarnUsageYards(yarnId, yardsUsed){
    to the yd/m preference — but held during the session so the dropdown and
    field don't snap back to length after every entry. */
 const _usedModeMemory = {};
+const _usedSourceMemory = {};   // per-yarn chosen source ('new' or a scrap id), session-only
 /* Convert canonical yards to the value shown in a given entry mode. */
 function yardsToUsedEntry(yards, mode, yarn){
   const y = Number(yards)||0;
@@ -2538,6 +2765,10 @@ function renderProjectForm(){
       <div id="pf-yarn-picker">${buildYarnPickerHTML()}</div>
     </div>
 
+    <label class="field span2">Notes (optional)
+      <textarea id="pf-notes" rows="4" placeholder="Modifications, where you left off, what you'd change next time…">${v('notes')}</textarea>
+    </label>
+
     <div class="span2">
       <span class="note field-label">Links (pattern, YouTube tutorial, blog post…)</span>
       <div class="link-input-row">
@@ -2631,11 +2862,15 @@ function handleSaveProject(e){
     name,
     patternName: document.getElementById('pf-pattern').value.trim(),
     needleSize: document.getElementById('pf-needlesize').value.trim() || null,
+    notes: document.getElementById('pf-notes').value.trim() || null,
+    patternId: pendingProjectPatternId || null,
     gauge: (()=>{
       const s = document.getElementById('pf-gauge-sts').value;
       const r = document.getElementById('pf-gauge-rows').value;
       if(s==='' && r==='') return null;
-      return { sts: s===''?null:Number(s), rows: r===''?null:Number(r), unit: document.getElementById('pf-gauge-unit').value };
+      // Keep details saved from the gauge calculator (craft, stitch type, terms).
+      const prev = (existing && existing.gauge) || {};
+      return { ...prev, sts: s===''?null:Number(s), rows: r===''?null:Number(r), unit: document.getElementById('pf-gauge-unit').value };
     })(),
     status: document.getElementById('pf-status').value,
     startDate: document.getElementById('pf-startdate').value || todayStr(),
@@ -2651,9 +2886,9 @@ function handleSaveProject(e){
     links: pendingProjectLinks.map(l=>({ id:l.id, url:l.url, type:l.type, title:l.title, thumbnail:l.thumbnail }))
   };
   if(existing){
-    STATE.projects = STATE.projects.map(p => p.id===STATE.editingProjectId ? { ...p, ...fields } : p);
+    STATE.projects = STATE.projects.map(p => p.id===STATE.editingProjectId ? { ...p, ...fields, updatedAt: new Date().toISOString() } : p);
   } else {
-    STATE.projects.push({ id: STATE.editingProjectId, ...fields, createdAt: todayStr() });
+    STATE.projects.push({ id: STATE.editingProjectId, ...fields, createdAt: todayStr(), updatedAt: new Date().toISOString() });
   }
   persist();
   STATE.showProjectForm = false;
@@ -2663,6 +2898,7 @@ function handleSaveProject(e){
   pendingProjectPhotos = [];
   pendingProjectCounters = [];
   renderTab();
+  scrollToTop();
 }
 
 async function deleteProject(id){
@@ -2678,6 +2914,36 @@ function updateProjectStatus(id, status){
   STATE.projects = STATE.projects.map(p => p.id===id ? {...p, status} : p);
   persist();
   renderTab();
+}
+/* Duplicate a project — copies the PLAN (name, pattern, needle, gauge, linked
+   yarns, per-yarn "need", counter setup) but resets PROGRESS: status back to
+   Planned, no dates, no photos, and usage cleared (so it doesn't double-deduct
+   stock or double-reference the original's uploaded photos). For remaking the
+   same thing without re-entering everything. */
+function duplicateProject(id){
+  const src = STATE.projects.find(p=>p.id===id);
+  if(!src) return;
+  const copy = {
+    ...JSON.parse(JSON.stringify(src)),
+    id: uid(),
+    name: (src.name||'Project') + ' (copy)',
+    status: 'Planned',
+    startDate: todayStr(),
+    finishDate: null,
+    yarnUsage: [],                 // reset progress so stock isn't double-counted
+    photos: [],                    // don't share the original's uploaded images
+    createdAt: todayStr(),
+    updatedAt: new Date().toISOString()
+  };
+  // Keep counters' configuration but zero their live progress.
+  if(Array.isArray(copy.counters)){
+    copy.counters = copy.counters.map(c=>({ ...c, value:0, stitches:null }));
+  }
+  STATE.projects.push(copy);   // array is oldest→newest, so "Newest" shows it first
+  persist();
+  wgToast('Project duplicated — progress reset, plan kept.', 'success');
+  renderTab();
+  scrollToTop();
 }
 
 function renderProjectRow(p){
@@ -2702,17 +2968,18 @@ function renderProjectRow(p){
   return `<div class="project-row">
     <span class="status-dot" style="background:${STATUS_COLORS[p.status]}"></span>
     <div class="grow">
-      <p class="project-name">${esc(p.name)}${p.patternName ? ` <span class="pattern">— ${esc(p.patternName)}</span>` : ''}</p>
+      <p class="project-name">${esc(p.name)}${p.patternName ? ` <span class="pattern">— ${p.patternId && STATE.patterns.some(pt=>pt.id===p.patternId) ? `<button type="button" class="pattern-inline-link" onclick="openPatternInLibrary('${p.patternId}')" title="Open in pattern library">${ICONS.book} ${esc(p.patternName)}</button>` : esc(p.patternName)}</span>` : ''}</p>
       <div class="project-meta">
         ${usedYarns.map(y=>`<span class="dot" style="background:${y.colorHex}" title="${esc(y.name)}"></span>`).join('')}
         ${garmentBadge ? `<span class="note">${esc(garmentBadge)}</span>` : ''}
         ${p.needleSize ? `<span class="note">🪡 ${esc(p.needleSize)}</span>` : ''}
-        ${p.gauge && (p.gauge.sts||p.gauge.rows) ? `<span class="note">📐 ${p.gauge.sts||'?'}×${p.gauge.rows||'?'}/${p.gauge.unit==='cm'?'10cm':'4in'}</span>` : ''}
+        ${p.gauge && (p.gauge.sts||p.gauge.rows) ? `<span class="note">📐 ${p.gauge.sts||'?'}×${p.gauge.rows||'?'}/${p.gauge.unit==='cm'?'10cm':'4in'}${p.gauge.stitchType?` ${esc(p.gauge.stitchType)}${p.gauge.terms==='uk'?' (UK)':''}`:''}</span>` : ''}
         ${attachedPalette ? `<span class="note">${ICONS.palette} ${esc(attachedPalette.name)}</span>` : ''}
         ${gapBadge}
         ${counters.length ? `<span class="note">${counters.length} counter${counters.length===1?'':'s'}</span>` : ''}
         ${daysActive!=null ? `<span class="days">${daysActive}d in progress</span>` : ''}
       </div>
+      ${p.notes ? renderProjectNotes(p.notes) : ''}
       ${linkStrip}
       ${counterPanel}
     </div>
@@ -2721,9 +2988,21 @@ function renderProjectRow(p){
     </select>
     ${counterToggle}
     ${gapInfo && gapInfo.gap>0 ? `<button class="del-btn" onclick="shopProjectGap('${p.id}')" aria-label="Add gap to shopping list" title="Add the ${Math.round(gapInfo.gap)} yd gap to your shopping list">${ICONS.cart}</button>` : ''}
+    <button class="del-btn" onclick="duplicateProject('${p.id}')" aria-label="Duplicate project" title="Make a copy of this project">⧉</button>
     <button class="del-btn" onclick="showProjectForm('${p.id}')" aria-label="Edit project">${ICONS.pencil}</button>
     <button class="del-btn" onclick="deleteProject('${p.id}')" aria-label="Delete project">${ICONS.trash}</button>
   </div>`;
+}
+/* Project notes on the list row: first line as a one-line preview; tap to
+   expand the full text (line breaks preserved). */
+function renderProjectNotes(notes){
+  const first = notes.split('\n')[0];
+  const more = notes.length > first.length || first.length > 80;
+  if(!more) return `<p class="project-notes note">📝 ${esc(first)}</p>`;
+  return `<details class="project-notes note">
+    <summary>📝 ${esc(first.length>80 ? first.slice(0,80)+'…' : first)}</summary>
+    <div class="project-notes-full">${esc(notes)}</div>
+  </details>`;
 }
 /* --- Row counters (used from the project row; configured in the edit form) --- */
 function renderCounter(projectId, c){
@@ -3147,6 +3426,7 @@ async function saveCurrentPalette(){
   persist();
   wgToast('Palette saved.', 'success');
   renderTab();
+  scrollToTop();
 }
 async function deleteSavedPalette(id){
   if(!(await wgConfirm('Delete this saved palette?', {title:'Delete palette', okLabel:'Delete', danger:true}))) return;
@@ -3203,7 +3483,7 @@ function renderShowcaseCard(p){
   const garmentBadge = (p.garmentSize || p.garmentGender) ? [p.garmentGender, p.garmentSize].filter(Boolean).join(' · ') : null;
   return `<div class="card showcase-card">
     ${mainImage
-      ? `<img class="showcase-photo" src="${esc(mainImage)}" alt="${esc(p.name)}" />`
+      ? `<img class="showcase-photo" src="${esc(mainImage)}" alt="${esc(p.name)}" style="cursor:zoom-in;" onclick="openLightbox('${p.id}')" />`
       : `<div class="showcase-placeholder">No photo yet</div>`}
     <div class="showcase-body">
       <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px;">
@@ -3220,6 +3500,55 @@ function renderShowcaseCard(p){
     </div>
   </div>`;
 }
+
+/* Photo lightbox for the Showcase — tap a project photo to view it large,
+   with prev/next paging when a project has multiple photos. */
+let _lightbox = { photos: [], i: 0 };
+function openLightbox(projectId){
+  const p = STATE.projects.find(pp=>pp.id===projectId);
+  if(!p) return;
+  const photos = (p.photos||[]).slice();
+  if(!photos.length){
+    const thumb = (p.links||[]).map(l=>l.thumbnail).find(Boolean);
+    if(thumb) photos.push(thumb);
+  }
+  if(!photos.length) return;
+  _lightbox = { photos, i: 0 };
+  drawLightbox();
+}
+function drawLightbox(){
+  const root = document.getElementById('wg-modal-root');
+  const { photos, i } = _lightbox;
+  const multi = photos.length > 1;
+  root.innerHTML = `<div class="wg-modal-backdrop open" id="wg-lightbox" style="align-items:center;">
+    <div class="lightbox-inner">
+      <img src="${esc(photos[i])}" alt="" class="lightbox-img" />
+      ${multi ? `<div class="lightbox-controls">
+        <button class="btn btn-ghost btn-small" onclick="lightboxStep(-1)" aria-label="Previous">‹</button>
+        <span class="note">${i+1} / ${photos.length}</span>
+        <button class="btn btn-ghost btn-small" onclick="lightboxStep(1)" aria-label="Next">›</button>
+      </div>` : ''}
+      <button class="lightbox-close" onclick="closeLightbox()" aria-label="Close">✕</button>
+    </div>
+  </div>`;
+  const bd = document.getElementById('wg-lightbox');
+  bd.onclick = (e)=>{ if(e.target===bd) closeLightbox(); };
+}
+function lightboxStep(d){
+  const n = _lightbox.photos.length;
+  _lightbox.i = (_lightbox.i + d + n) % n;
+  drawLightbox();
+}
+function closeLightbox(){
+  const root = document.getElementById('wg-modal-root');
+  if(root) root.innerHTML = '';
+}
+document.addEventListener('keydown', (e)=>{
+  if(!document.getElementById('wg-lightbox')) return;
+  if(e.key==='Escape') closeLightbox();
+  else if(e.key==='ArrowLeft') lightboxStep(-1);
+  else if(e.key==='ArrowRight') lightboxStep(1);
+});
 
 /* =================================================================
    Shopping list — first-class saved object. Gaps from projects and
@@ -3315,6 +3644,7 @@ function submitShoppingForm(e){
   STATE.showShoppingForm = false;
   STATE.editingShoppingId = null;
   renderTab();
+  scrollToTop();
 }
 function renderShoppingForm(){
   const editing = STATE.editingShoppingId ? STATE.shoppingList.find(i=>i.id===STATE.editingShoppingId) : null;
@@ -3344,114 +3674,1234 @@ function renderShoppingForm(){
 }
 
 /* =================================================================
-   Gauge calculator (standalone). Enter a swatch — stitches & rows over a
-   measurement (in or cm), plus the conditions (knit/crochet, stitch type,
-   hook/needle). Computes stitches-per-unit and rows-per-unit. If a target
-   gauge is entered (from the pattern), compares and reports how far off you
-   are and which direction to adjust the hook/needle.
+   Gauge calculator (standalone). Enter a swatch — stitches counted across a
+   measured width and rows counted down a measured height (in or cm) — plus
+   the conditions (knit/crochet, stitch type, hook/needle). Everything else
+   is the same simple proportion:
+       stitches needed = target width  × swatch stitches ÷ swatch width
+       rows needed     = target length × swatch rows     ÷ swatch height
+   Sections: your gauge; compare to the pattern (stitches AND rows) and
+   convert the pattern's counts to yours; size → stitches/rows (rounded to
+   a stitch multiple); and spacing increases/decreases evenly. Counts are
+   true stitches only — no turning-chain/foundation extras are added, since
+   patterns handle those differently (e.g. stacked single crochets).
 ================================================================= */
-function gaugeUpdate(field, val){
-  STATE.gauge[field] = val;
-  // Only the result area needs refreshing; re-render the whole tab is simplest
-  // and keeps inputs in sync, but that blurs fields. Instead update the result
-  // panel in place so typing stays smooth.
-  const el = document.getElementById('gauge-result');
-  if(el) el.innerHTML = buildGaugeResultHTML();
+
+/* ---- Pure math (covered by tests.html) ---- */
+// Stitches/rows per one unit of measure, or null if not enough input.
+function gaugeRate(count, span){
+  count = Number(count); span = Number(span);
+  return count>0 && span>0 ? count/span : null;
 }
-function buildGaugeResultHTML(){
+// The core proportion: how many stitches (or rows) for a target size.
+function countForSize(size, count, span){
+  const rate = gaugeRate(count, span);
+  size = Number(size);
+  return rate && size>0 ? Math.round(size*rate) : null;
+}
+// Valid counts for a stitch pattern "multiple of `mult` + `plus`" nearest to
+// n: the closest at-or-below and at-or-above. Equal when n is already valid.
+function nearestMultiples(n, mult, plus){
+  n = Number(n); mult = Math.floor(Number(mult)); plus = Math.floor(Number(plus)||0);
+  if(!(n>0) || !(mult>=1)) return null;
+  if(n <= plus) return { below:null, above:plus>0?plus:mult };
+  const k = Math.floor((n - plus) / mult);
+  const below = plus + k*mult;
+  const above = below===n ? n : below + mult;
+  return { below: below>0 ? below : null, above };
+}
+// A pattern count at the pattern's gauge → the count at your gauge.
+function translateCount(count, yourRate, patternRate){
+  count = Number(count); yourRate = Number(yourRate); patternRate = Number(patternRate);
+  return count>0 && yourRate>0 && patternRate>0 ? Math.round(count*yourRate/patternRate) : null;
+}
+// Spread `changes` increases or decreases as evenly as possible across a row
+// of `sts` stitches. Returns groups of { size, times } — `size` is how many
+// existing stitches each repeat consumes — or { error }.
+function spreadShaping(sts, changes, kind){
+  sts = Math.floor(Number(sts)); changes = Math.floor(Number(changes));
+  if(!(sts>0) || !(changes>0)) return null;
+  const minSize = kind==='dec' ? 2 : 1;
+  if(sts < changes*minSize){
+    return { error: kind==='dec'
+      ? `Too many decreases — each one uses 2 stitches, so ${sts} stitches allow at most ${Math.floor(sts/2)}.`
+      : `Too many increases — at most one per stitch (${sts}).` };
+  }
+  const q = Math.floor(sts/changes), r = sts % changes;
+  const groups = [];
+  if(r) groups.push({ size:q+1, times:r });
+  groups.push({ size:q, times:changes-r });
+  return { groups, result: kind==='dec' ? sts-changes : sts+changes };
+}
+
+/* US ↔ UK crochet names (UK names are one step "taller"). Used only to show
+   a hint next to the free-text stitch type when it's a recognized
+   abbreviation. */
+const CROCHET_US_TO_UK = { sc:'dc', hdc:'htr', dc:'tr', tr:'dtr', dtr:'trtr' };
+const CROCHET_NAMES = { sc:'single crochet', hdc:'half double crochet', dc:'double crochet', tr:'treble', dtr:'double treble', htr:'half treble', trtr:'triple treble' };
+function crochetTermHint(stitch, terms){
+  const key = (stitch||'').trim().toLowerCase();
+  if(!key) return '';
+  const map = terms==='uk'
+    ? Object.fromEntries(Object.entries(CROCHET_US_TO_UK).map(([us,uk])=>[uk,us]))
+    : CROCHET_US_TO_UK;
+  const other = map[key];
+  if(!other) return '';
+  return terms==='uk'
+    ? `UK ${key} = US ${other} (${CROCHET_NAMES[other]})`
+    : `US ${key} = UK ${other}`;
+}
+// Wording for one shaping repeat, e.g. "K5, M1" or "4 sc, 2 sc in next".
+function shapingRepeatText(size, kind, craft, stitchWord){
+  if(craft==='crochet'){
+    const st = stitchWord || 'st';
+    if(kind==='dec') return size>2 ? `${size-2} ${st}, ${st}2tog` : `${st}2tog`;
+    return size>1 ? `${size-1} ${st}, 2 ${st} in next` : `2 ${st} in next`;
+  }
+  if(kind==='dec') return size>2 ? `K${size-2}, k2tog` : 'k2tog';
+  return `K${size}, M1`;
+}
+
+/* ---- UI ---- */
+function gaugeRefSpan(){ return STATE.gauge.measUnit==='cm' ? 10 : 4; }
+function gaugeUnit(){ return STATE.gauge.measUnit==='cm' ? 'cm' : 'in'; }
+function round1(n){ return Math.round(n*10)/10; }
+// Typing only refreshes the result panels (keeps focus); fields that change
+// labels (craft, unit, terms) re-render the whole tab.
+// Switch inches ↔ cm; swatch sizes still at the default (4 in / 10 cm)
+// follow along so the swatch reads naturally in the new unit.
+function gaugeSetUnit(unit){
+  const g = STATE.gauge, from = g.measUnit==='cm' ? 10 : 4, to = unit==='cm' ? 10 : 4;
+  if(Number(g.swW)===from || g.swW==='') g.swW = to;
+  if(Number(g.swH)===from || g.swH==='') g.swH = to;
+  g.measUnit = unit;
+}
+function gaugeUpdate(field, val){
+  if(field==='measUnit'){ gaugeSetUnit(val); renderTab(); return; }
+  STATE.gauge[field] = val;
+  if(['craft','terms'].includes(field)){ renderTab(); return; }
+  refreshGaugeOutputs();
+}
+function gaugeToggle(key, open){ STATE.gauge.open = { ...(STATE.gauge.open||{}), [key]: open }; }
+const GAUGE_OUTPUTS = {
+  'g-out-gauge': ()=>buildYourGaugeHTML(),
+  'g-out-compare': ()=>buildGaugeCompareHTML(),
+  'g-out-size': ()=>buildGaugeSizeHTML(),
+  'g-out-shape': ()=>buildGaugeShapeHTML(),
+  'g-out-hint': ()=>buildTermHintHTML()
+};
+function refreshGaugeOutputs(){
+  Object.entries(GAUGE_OUTPUTS).forEach(([id, fn])=>{
+    const el = document.getElementById(id);
+    if(el) el.innerHTML = fn();
+  });
+}
+function gaugeRates(){
   const g = STATE.gauge;
-  const meas = Number(g.measSize)||0;
-  const sts = Number(g.sts)||0;
-  const rows = Number(g.rows)||0;
-  const unit = g.measUnit==='cm' ? 'cm' : 'in';
-  if(!meas || !sts){
-    return `<p class="note">Enter your swatch measurement and stitch count to see your gauge.</p>`;
-  }
-  const stsPer = sts/meas;
-  const rowsPer = rows>0 ? rows/meas : null;
-  // Standard reference is per 4 in / per 10 cm.
-  const refSpan = unit==='cm' ? 10 : 4;
-  const stsPerRef = Math.round(stsPer*refSpan*10)/10;
-  const rowsPerRef = rowsPer!=null ? Math.round(rowsPer*refSpan*10)/10 : null;
-
-  let out = `<div class="card" style="margin-top:4px;">
-    <p style="margin:0 0 6px; font-weight:600; font-family:'Fraunces',serif;">Your gauge</p>
-    <p style="margin:0; font-size:0.9rem;">${Math.round(stsPer*10)/10} sts / ${unit} · <strong>${stsPerRef} sts per ${refSpan} ${unit}</strong></p>
-    ${rowsPerRef!=null ? `<p style="margin:2px 0 0; font-size:0.9rem;">${Math.round(rowsPer*10)/10} rows / ${unit} · <strong>${rowsPerRef} rows per ${refSpan} ${unit}</strong></p>` : ''}
+  return { sts: gaugeRate(g.sts, g.swW), rows: gaugeRate(g.rows, g.swH) };
+}
+function buildTermHintHTML(){
+  const g = STATE.gauge;
+  if(g.craft!=='crochet') return '';
+  const hint = crochetTermHint(g.stitchType, g.terms);
+  return hint ? `<span class="note">${esc(hint)}</span>` : '';
+}
+function buildYourGaugeHTML(){
+  const { sts, rows } = gaugeRates();
+  const unit = gaugeUnit(), ref = gaugeRefSpan();
+  if(!sts && !rows) return `<p class="note">Enter stitches and the width they cover (and rows and the height they cover) to see your gauge.</p>`;
+  return `<div class="gauge-result-card">
+    ${sts ? `<p class="no-margin">${round1(sts)} sts / ${unit} · <strong>${round1(sts*ref)} sts per ${ref} ${unit}</strong></p>` : ''}
+    ${rows ? `<p class="no-margin">${round1(rows)} rows / ${unit} · <strong>${round1(rows*ref)} rows per ${ref} ${unit}</strong></p>` : ''}
   </div>`;
-
-  // Target comparison
-  const tSts = Number(g.targetSts)||0;
-  if(tSts>0){
-    // Target is expressed per the same reference span the user is working in.
-    const diffPct = ((stsPerRef - tSts) / tSts) * 100;
-    const absPct = Math.abs(Math.round(diffPct));
-    let verdict, advice, cls;
-    if(absPct <= 3){
-      verdict = 'On gauge ✓'; cls='ok-text';
-      advice = 'Your stitch gauge matches the target closely — you\'re good to go.';
-    } else if(diffPct > 0){
-      // more stitches per span than target = your stitches are smaller = tighter
-      verdict = `Running tight — ${absPct}% too many stitches`; cls='danger-text';
-      advice = 'Your stitches are smaller than the pattern\'s, so your piece will come out too small. Try going up a hook/needle size and re-swatching.';
-    } else {
-      verdict = `Running loose — ${absPct}% too few stitches`; cls='danger-text';
-      advice = 'Your stitches are larger than the pattern\'s, so your piece will come out too big. Try going down a hook/needle size and re-swatching.';
-    }
-    out += `<div class="card" style="margin-top:10px;">
-      <p style="margin:0 0 4px; font-weight:600;" class="${cls}">${esc(verdict)}</p>
-      <p class="note" style="margin:0;">Target: ${tSts} sts per ${refSpan} ${unit} · You: ${stsPerRef}</p>
-      <p style="margin:6px 0 0; font-size:0.85rem;">${advice}</p>
-    </div>`;
+}
+function gaugeVerdictHTML(kindLabel, mine, target, ref, unit){
+  const diffPct = ((mine - target) / target) * 100;
+  const absPct = Math.abs(Math.round(diffPct));
+  const dim = kindLabel==='stitches' ? 'wider' : 'longer';
+  const dimSmall = kindLabel==='stitches' ? 'narrower' : 'shorter';
+  let verdict, cls, advice;
+  if(absPct <= 3){ verdict = `${kindLabel[0].toUpperCase()+kindLabel.slice(1)}: on gauge ✓`; cls='ok-text'; advice=''; }
+  else if(diffPct > 0){
+    verdict = `${kindLabel[0].toUpperCase()+kindLabel.slice(1)}: ${absPct}% too many (tight)`; cls='danger-text';
+    advice = `Following the pattern as written comes out about ${absPct}% ${dimSmall}. Try a larger hook/needle, or use the converted counts below.`;
+  } else {
+    verdict = `${kindLabel[0].toUpperCase()+kindLabel.slice(1)}: ${absPct}% too few (loose)`; cls='danger-text';
+    advice = `Following the pattern as written comes out about ${absPct}% ${dim}. Try a smaller hook/needle, or use the converted counts below.`;
   }
-  return out;
+  return `<p class="no-margin ${cls}" style="font-weight:600;">${esc(verdict)}</p>
+    <p class="note no-margin">Pattern: ${target} per ${ref} ${unit} · You: ${round1(mine)}</p>
+    ${advice ? `<p class="no-margin" style="font-size:0.85rem;">${advice}</p>` : ''}`;
+}
+function buildGaugeCompareHTML(){
+  const g = STATE.gauge, unit = gaugeUnit(), ref = gaugeRefSpan();
+  const { sts, rows } = gaugeRates();
+  const tSts = Number(g.targetSts)||0, tRows = Number(g.targetRows)||0;
+  if(!tSts && !tRows) return `<p class="note">Enter the pattern's gauge to compare.</p>`;
+  const parts = [];
+  if(tSts && sts) parts.push(gaugeVerdictHTML('stitches', sts*ref, tSts, ref, unit));
+  if(tRows && rows) parts.push(gaugeVerdictHTML('rows', rows*ref, tRows, ref, unit));
+  // Pattern count → your count, at each gauge.
+  const ps = translateCount(g.patSts, sts, tSts/ref);
+  const pr = translateCount(g.patRows, rows, tRows/ref);
+  if(ps!=null) parts.push(`<p class="no-margin">Pattern's <strong>${Number(g.patSts)} sts</strong> → <strong>${ps} sts</strong> at your gauge</p>`);
+  if(pr!=null) parts.push(`<p class="no-margin">Pattern's <strong>${Number(g.patRows)} rows</strong> → <strong>${pr} rows</strong> at your gauge</p>`);
+  if(!parts.length) return `<p class="note">Enter your swatch above to compare.</p>`;
+  return `<div class="gauge-result-card stack-gap">${parts.join('')}</div>`;
+}
+function buildGaugeSizeHTML(){
+  const g = STATE.gauge, unit = gaugeUnit();
+  const { sts, rows } = gaugeRates();
+  const out = [];
+  const nSts = countForSize(g.sizeW, g.sts, g.swW);
+  const nRows = countForSize(g.sizeL, g.rows, g.swH);
+  if(nSts!=null){
+    out.push(`<p class="no-margin">For <strong>${Number(g.sizeW)} ${unit}</strong> wide: <strong>${nSts} stitches</strong></p>`);
+    const m = Number(g.multiple)>=1 ? nearestMultiples(nSts, g.multiple, g.multPlus) : null;
+    if(m && !(m.below===nSts && m.above===nSts)){
+      const opt = n => `<strong>${n} sts</strong> (${round1(n/sts)} ${unit})`;
+      const opts = [m.below, m.above].filter(n=>n!=null && n>0);
+      out.push(`<p class="no-margin" style="font-size:0.85rem;">To fit a multiple of ${Math.floor(g.multiple)}${Number(g.multPlus)?` + ${Math.floor(g.multPlus)}`:''}: ${opts.map(opt).join(' or ')}</p>`);
+    } else if(m){
+      out.push(`<p class="note no-margin">Already fits the multiple of ${Math.floor(g.multiple)}${Number(g.multPlus)?` + ${Math.floor(g.multPlus)}`:''} ✓</p>`);
+    }
+  }
+  if(nRows!=null) out.push(`<p class="no-margin">For <strong>${Number(g.sizeL)} ${unit}</strong> long: <strong>${nRows} rows</strong></p>`);
+  if(!out.length){
+    return `<p class="note">${(g.sizeW||g.sizeL) && !(sts||rows) ? 'Enter your swatch above first.' : 'Enter a width and/or length.'}</p>`;
+  }
+  return `<div class="gauge-result-card stack-gap">${out.join('')}
+    <p class="note no-margin">A starting point, not always the final number — adjust for the stitch-pattern multiple, any increases/decreases, and whether the piece is built in stitches or rows.</p>
+  </div>`;
+}
+function buildGaugeShapeHTML(){
+  const g = STATE.gauge;
+  const kind = g.shapeKind==='dec' ? 'dec' : 'inc';
+  const res = spreadShaping(g.shapeSts, g.shapeN, kind);
+  if(!res) return `<p class="note">Enter your current stitch count and how many to ${kind==='dec'?'decrease':'increase'}.</p>`;
+  if(res.error) return `<p class="danger-text no-margin">${esc(res.error)}</p>`;
+  // Short abbreviations from the stitch-type box (sc, hdc…) read naturally in
+  // crochet instructions; anything longer falls back to "st".
+  const word = (g.stitchType||'').trim();
+  const stitchWord = g.craft==='crochet' && /^[a-z]{1,4}$/i.test(word) ? word.toLowerCase() : null;
+  const steps = res.groups.map(gr => `[${shapingRepeatText(gr.size, kind, g.craft, stitchWord)}] ${gr.times} time${gr.times===1?'':'s'}`);
+  return `<div class="gauge-result-card stack-gap">
+    <p class="no-margin">Work ${steps.join(', then ')}.</p>
+    <p class="no-margin"><strong>${Number(g.shapeSts)} → ${res.result} sts</strong></p>
+    ${res.groups.length>1 ? `<p class="note no-margin">For the most even spread, alternate the two repeats instead of working them in blocks.</p>` : ''}
+  </div>`;
+}
+function saveGaugeToProject(){
+  const sel = document.getElementById('g-save-project');
+  const id = sel && sel.value;
+  if(!id){ wgToast('Pick a project first.', 'error'); return; }
+  const g = STATE.gauge, ref = gaugeRefSpan();
+  const { sts, rows } = gaugeRates();
+  if(!sts && !rows){ wgToast('Enter your swatch first.', 'error'); return; }
+  const gauge = {
+    sts: sts ? round1(sts*ref) : null,
+    rows: rows ? round1(rows*ref) : null,
+    unit: gaugeUnit(),
+    craft: g.craft,
+    stitchType: (g.stitchType||'').trim() || null,
+    terms: g.craft==='crochet' ? (g.terms||'us') : null
+  };
+  STATE.projects = STATE.projects.map(p => p.id===id ? {
+    ...p, gauge,
+    needleSize: p.needleSize || (g.needleSize||'').trim() || null,
+    updatedAt: new Date().toISOString()
+  } : p);
+  persist();
+  const proj = STATE.projects.find(p=>p.id===id);
+  wgToast(`Gauge saved to ${proj ? proj.name : 'project'}.`, 'success');
+}
+function gaugeNum(field, placeholder, extra=''){
+  return `<input type="number" min="0" step="any" inputmode="decimal" value="${esc(STATE.gauge[field]??'')}" placeholder="${placeholder}" oninput="gaugeUpdate('${field}', this.value)" ${extra} />`;
+}
+function gaugeSection(key, title, body){
+  const open = STATE.gauge.open && STATE.gauge.open[key];
+  return `<details class="card mb-4" ${open?'open':''} ontoggle="gaugeToggle('${key}', this.open)">
+    <summary class="gauge-summary">${title}</summary>
+    ${body}
+  </details>`;
 }
 function renderGauge(){
   const g = STATE.gauge;
-  const unit = g.measUnit==='cm' ? 'cm' : 'in';
-  const refSpan = unit==='cm' ? 10 : 4;
+  // First visit: measure in cm if the user works in meters.
+  if(!g._unitInit){ g._unitInit = true; if(STATE.unitPref==='m'){ g.measUnit='cm'; g.swW=10; g.swH=10; } }
+  const unit = gaugeUnit(), ref = gaugeRefSpan();
+  const crochet = g.craft==='crochet';
+  const projects = STATE.projects.filter(p=>p.status!=='Frogged');
   return `
-  <p class="note" style="margin:0 0 16px;">Knit or crochet a swatch, then enter what you measured. Gauge determines whether your finished piece comes out the right size.</p>
-  <div class="card form-grid" style="margin-bottom:16px;">
+  <p class="note" style="margin:0 0 16px;">${crochet?'Crochet':'Knit'} a swatch, then count stitches across and rows down, and measure each. Gauge decides whether your finished piece comes out the right size.</p>
+  <div class="card form-grid mb-4">
     <label class="field">Craft
       <select onchange="gaugeUpdate('craft', this.value)">
-        <option value="knit" ${g.craft==='knit'?'selected':''}>Knit</option>
-        <option value="crochet" ${g.craft==='crochet'?'selected':''}>Crochet</option>
+        <option value="knit" ${!crochet?'selected':''}>Knit</option>
+        <option value="crochet" ${crochet?'selected':''}>Crochet</option>
       </select>
     </label>
-    <label class="field">Stitch type (optional)
-      <input value="${esc(g.stitchType)}" placeholder="${g.craft==='crochet'?'e.g. single crochet':'e.g. stockinette'}" onchange="gaugeUpdate('stitchType', this.value)" />
-    </label>
-    <label class="field">Hook / needle size (optional)
-      <input value="${esc(g.needleSize)}" placeholder="e.g. 4.5 mm / US 7" onchange="gaugeUpdate('needleSize', this.value)" />
-    </label>
-    <label class="field">Measure over
-      <div style="display:flex; gap:6px; align-items:center;">
-        <input type="number" min="0" step="any" value="${esc(g.measSize)}" style="width:64px;" onchange="gaugeUpdate('measSize', this.value)" />
-        <select onchange="gaugeUpdate('measUnit', this.value)">
-          <option value="in" ${g.measUnit==='in'?'selected':''}>inches</option>
-          <option value="cm" ${g.measUnit==='cm'?'selected':''}>cm</option>
-        </select>
+    ${crochet ? `<div class="field gauge-field">Stitch terms
+      <div class="row">
+        <button type="button" class="harmony-btn ${g.terms!=='uk'?'active':''}" onclick="gaugeUpdate('terms','us')">US</button>
+        <button type="button" class="harmony-btn ${g.terms==='uk'?'active':''}" onclick="gaugeUpdate('terms','uk')">UK</button>
       </div>
+    </div>` : ''}
+    <label class="field">Stitch type (optional)
+      <input value="${esc(g.stitchType)}" placeholder="${crochet ? (g.terms==='uk'?'e.g. dc, htr, tr':'e.g. sc, hdc, dc') : 'e.g. stockinette, garter'}" oninput="gaugeUpdate('stitchType', this.value)" />
+      <span id="g-out-hint">${buildTermHintHTML()}</span>
     </label>
-    <label class="field">Stitches counted
-      <input type="number" min="0" step="any" value="${esc(g.sts)}" placeholder="18" onchange="gaugeUpdate('sts', this.value)" />
+    <label class="field">${crochet?'Hook':'Needle'} size (optional)
+      <input value="${esc(g.needleSize)}" placeholder="e.g. 4.5 mm${crochet?' / 7':' / US 7'}" oninput="gaugeUpdate('needleSize', this.value)" />
     </label>
-    <label class="field">Rows counted (optional)
-      <input type="number" min="0" step="any" value="${esc(g.rows)}" placeholder="24" onchange="gaugeUpdate('rows', this.value)" />
+    <label class="field">Measure in
+      <select onchange="gaugeUpdate('measUnit', this.value)">
+        <option value="in" ${unit==='in'?'selected':''}>inches</option>
+        <option value="cm" ${unit==='cm'?'selected':''}>cm</option>
+      </select>
     </label>
+    <div class="field gauge-field span2">Your swatch
+      <div class="gauge-swatch-grid">
+        <span>Stitches</span>${gaugeNum('sts', unit==='cm'?'14':'18', 'aria-label="Stitches counted"')}
+        <span>across</span>${gaugeNum('swW', ref, 'aria-label="Width measured"')}<span>${unit}</span>
+        <span>Rows</span>${gaugeNum('rows', unit==='cm'?'12':'24', 'aria-label="Rows counted"')}
+        <span>down</span>${gaugeNum('swH', ref, 'aria-label="Height measured"')}<span>${unit}</span>
+      </div>
+    </div>
+    <div class="span2" id="g-out-gauge">${buildYourGaugeHTML()}</div>
+    ${projects.length ? `<div class="span2 row">
+      <select id="g-save-project" aria-label="Project to save gauge to" class="grow" style="max-width:280px;">
+        <option value="">Save this gauge to a project…</option>
+        ${projects.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('')}
+      </select>
+      <button type="button" class="btn btn-ghost btn-small" onclick="saveGaugeToProject()">Save</button>
+    </div>` : ''}
   </div>
 
-  <details class="card" style="margin-bottom:16px;">
-    <summary style="cursor:pointer; font-weight:600; font-family:'Fraunces',serif;">Compare to a pattern's target gauge (optional)</summary>
-    <p class="note" style="margin:8px 0;">Enter the gauge your pattern calls for, per ${refSpan} ${unit}, to check if you're on gauge.</p>
-    <label class="field" style="max-width:220px;">Target stitches per ${refSpan} ${unit}
-      <input type="number" min="0" step="any" value="${esc(g.targetSts)}" placeholder="20" onchange="gaugeUpdate('targetSts', this.value)" />
-    </label>
-  </details>
+  ${gaugeSection('size', 'How many stitches &amp; rows for a size?', `
+    <p class="note" style="margin:8px 0;">Want a sleeve 25 ${unit} wide? Stitches = 25 × your stitches ÷ your swatch width. Same for rows and length.</p>
+    <div class="form-grid" style="margin-bottom:10px;">
+      <label class="field">Target width (${unit})${gaugeNum('sizeW', unit==='cm'?'25':'10')}</label>
+      <label class="field">Target length (${unit})${gaugeNum('sizeL', unit==='cm'?'30':'12')}</label>
+      <div class="field gauge-field span2">Stitch pattern multiple (optional)
+        <div class="row">multiple of ${gaugeNum('multiple','e.g. 6','style="width:80px;"')} + ${gaugeNum('multPlus','0','style="width:70px;"')}</div>
+      </div>
+    </div>
+    <div id="g-out-size">${buildGaugeSizeHTML()}</div>`)}
 
-  <div id="gauge-result">${buildGaugeResultHTML()}</div>
+  ${gaugeSection('compare', 'Compare to your pattern', `
+    <p class="note" style="margin:8px 0;">Enter the gauge your pattern calls for, per ${ref} ${unit}.</p>
+    <div class="form-grid" style="margin-bottom:10px;">
+      <label class="field">Pattern stitches per ${ref} ${unit}${gaugeNum('targetSts', unit==='cm'?'16':'20')}</label>
+      <label class="field">Pattern rows per ${ref} ${unit}${gaugeNum('targetRows', unit==='cm'?'14':'24')}</label>
+      <label class="field">Convert a pattern stitch count (optional)${gaugeNum('patSts','e.g. 80')}</label>
+      <label class="field">Convert a pattern row count (optional)${gaugeNum('patRows','e.g. 40')}</label>
+    </div>
+    <div id="g-out-compare">${buildGaugeCompareHTML()}</div>`)}
+
+  ${gaugeSection('shape', 'Spread increases or decreases evenly', `
+    <div class="form-grid" style="margin:8px 0 10px;">
+      <label class="field">Current stitches${gaugeNum('shapeSts','60')}</label>
+      <div class="field gauge-field">How many
+        <div class="row">
+          <select onchange="gaugeUpdate('shapeKind', this.value)" aria-label="Increase or decrease">
+            <option value="inc" ${g.shapeKind!=='dec'?'selected':''}>Increase</option>
+            <option value="dec" ${g.shapeKind==='dec'?'selected':''}>Decrease</option>
+          </select>
+          ${gaugeNum('shapeN','10','style="width:80px;" aria-label="Number of stitches"')}
+        </div>
+      </div>
+    </div>
+    <div id="g-out-shape">${buildGaugeShapeHTML()}</div>`)}
   `;
+}
+
+/* =================================================================
+   Order import — read a purchase confirmation and turn the yarn in it into
+   stash entries. Input: pasted email text, a saved .eml file, a PDF receipt
+   or a screenshot/photo. Everything runs on this device with fixed rules
+   (no AI, nothing uploaded): find lines that look like yarn (known brands,
+   yarn words), pick up quantity, price, colorway, grams and length nearby,
+   fill in specs from the brand/line presets, then let the user review and
+   edit every item before anything is added.
+================================================================= */
+
+/* ---- .eml (MIME) decoding ---- */
+function decodeQuotedPrintableBytes(str){
+  const s = str.replace(/=\r?\n/g, '');
+  const bytes = [];
+  for(let i=0; i<s.length; i++){
+    if(s[i]==='=' && /^[0-9A-F]{2}$/i.test(s.substr(i+1,2))){ bytes.push(parseInt(s.substr(i+1,2),16)); i+=2; }
+    else { const c = s.charCodeAt(i); if(c<256) bytes.push(c); else bytes.push(...new TextEncoder().encode(s[i])); }
+  }
+  return new Uint8Array(bytes);
+}
+function decodeBytes(bytes, charset){
+  try{ return new TextDecoder((charset||'utf-8').toLowerCase()).decode(bytes); }
+  catch(e){ return new TextDecoder('utf-8').decode(bytes); }
+}
+function decodeBodyPart(body, encoding, charset){
+  encoding = (encoding||'').toLowerCase().trim();
+  if(encoding==='base64'){
+    try{
+      const bin = atob(body.replace(/[^A-Za-z0-9+/=]/g,''));
+      return decodeBytes(Uint8Array.from(bin, c=>c.charCodeAt(0)), charset);
+    }catch(e){ return ''; }
+  }
+  if(encoding==='quoted-printable') return decodeBytes(decodeQuotedPrintableBytes(body), charset);
+  return body;
+}
+// RFC 2047 encoded words in headers, e.g. =?UTF-8?Q?Your_order?=
+function decodeMimeHeader(v){
+  return (v||'').replace(/=\?([^?]+)\?([BQ])\?([^?]*)\?=/gi, (m, cs, enc, txt)=>{
+    if(enc.toUpperCase()==='B') return decodeBodyPart(txt, 'base64', cs);
+    return decodeBytes(decodeQuotedPrintableBytes(txt.replace(/_/g,' ')), cs);
+  }).replace(/\?=\s+=\?/g,'');
+}
+function splitMimeEntity(raw){
+  const m = raw.match(/\r?\n\r?\n/);
+  const headText = m ? raw.slice(0, m.index) : raw;
+  const body = m ? raw.slice(m.index + m[0].length) : '';
+  const headers = {};
+  headText.replace(/\r?\n[ \t]+/g, ' ').split(/\r?\n/).forEach(line=>{
+    const i = line.indexOf(':');
+    if(i>0){ const k = line.slice(0,i).trim().toLowerCase(); if(!(k in headers)) headers[k] = line.slice(i+1).trim(); }
+  });
+  return { headers, body };
+}
+function mimeParam(header, name){
+  const m = (header||'').match(new RegExp(name+'\\s*=\\s*("([^"]*)"|[^;\\s]+)', 'i'));
+  return m ? (m[2]!=null ? m[2] : m[1]) : null;
+}
+// Returns { plain, html } text collected from a MIME entity (recursive).
+function mimeEntityText(headers, body){
+  const ct = headers['content-type'] || 'text/plain';
+  if(/^multipart\//i.test(ct)){
+    const boundary = mimeParam(ct, 'boundary');
+    if(!boundary) return { plain: body, html: '' };
+    const parts = body.split(new RegExp('\\r?\\n?--' + boundary.replace(/[.*+?^${}()|[\]\\]/g,'\\$&') + '(?:--)?[ \\t]*\\r?\\n?'));
+    const out = { plain:'', html:'' };
+    parts.slice(1).forEach(p=>{
+      if(!p.trim()) return;
+      const e = splitMimeEntity(p);
+      if(/attachment/i.test(e.headers['content-disposition']||'')) return;
+      const t = mimeEntityText(e.headers, e.body);
+      out.plain += t.plain ? t.plain + '\n' : '';
+      out.html += t.html ? t.html + '\n' : '';
+    });
+    return out;
+  }
+  const text = decodeBodyPart(body, headers['content-transfer-encoding'], mimeParam(ct,'charset'));
+  if(/text\/html/i.test(ct)) return { plain:'', html:text };
+  if(/text\/plain/i.test(ct) || !/\//.test(ct)) return { plain:text, html:'' };
+  return { plain:'', html:'' };
+}
+// Table cells joined with " | " so a product, its quantity and price stay on
+// one line; block elements become line breaks.
+function htmlToText(html){
+  const marked = html
+    .replace(/<(style|script|head)[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<\/(td|th)>/gi, ' | ')
+    .replace(/<br\s*\/?>|<\/(tr|p|div|li|h[1-6]|table)>/gi, '\n');
+  const doc = new DOMParser().parseFromString(marked, 'text/html');
+  return (doc.body ? doc.body.textContent : '').replace(/ /g,' ');
+}
+function parseEml(raw){
+  const { headers, body } = splitMimeEntity(raw);
+  const t = mimeEntityText(headers, body);
+  // Plain text is usually laid out line-per-item; HTML is the fallback (or
+  // preferred when the plain part is a stub like "view this in a browser").
+  const plain = (t.plain||'').trim();
+  const text = plain.length > 200 || !t.html ? plain : htmlToText(t.html);
+  return { from: decodeMimeHeader(headers.from), subject: decodeMimeHeader(headers.subject), date: headers.date || null, text };
+}
+
+/* ---- Rules for finding yarn in order text ---- */
+const ORDER_SKIP_RE = /\b(sub-?total|grand total|total|shipping|delivery|postage|tax|vat|discount|coupon|promo|gift ?card|order (number|no\.?|#)|invoice|payment|paid|visa|mastercard|amex|paypal|billing|address|ship(ping)? to|bill to|tracking|unsubscribe|privacy|copyright|view in (your )?browser|customer service|reward|points|estimated|returns?)\b|©/i;
+const ORDER_ATTR_RE = /^(colou?r(way)?|shade|col\.?|dye ?lot|lot|qty|quantity|weight|size|variant|option|price|unit price|sku|item #?)\s*[:#.\-]\s*(.*)$/i;
+const NON_YARN_RE = /\b(needles?|hooks?|stitch markers?|notions|scissors|ruler|patterns?|books?|gift ?wrap|tote|blocking|mats?|swift|winder|buttons?)\b/i;
+const YARN_WORD_RE = /\b(yarns?|wool|merino|alpaca|mohair|cashmere|cotton|acrylic|silk|linen|bamboo|nylon|superwash|skeins?|hanks?|fingering|sock|sport|dk|worsted|aran|chunky|bulky|lace weight|ply|tweed|boucle|chenille)\b/i;
+const PRICE_RE = /(?:[$£€]|\b(?:USD|CAD|AUD|GBP|EUR)\s?)\s?(\d{1,4}(?:[.,]\d{2})?)|(\d{1,4}[.,]\d{2})\s?(?:USD|CAD|AUD|GBP|EUR|€|£)/gi;
+function orderPrices(line){
+  const out = []; let m; PRICE_RE.lastIndex = 0;
+  while((m = PRICE_RE.exec(line))) out.push(Number((m[1]||m[2]).replace(',','.')));
+  return out;
+}
+function orderQty(line){
+  let m = line.match(/\b(?:qty|quantity)\s*[:x]?\s*(\d{1,3})\b/i)
+       || line.match(/[x×]\s*(\d{1,3})\b(?!\s*(?:g|gr|grams?|m|yds?|yards?|mm|cm)\b)/i)
+       || line.match(/^\s*(\d{1,3})\s*[x×]\s/i);
+  return m ? Number(m[1]) : null;
+}
+function orderSpecs(text){
+  const g = text.match(/\b(\d{2,4})\s?(?:g|gr|grams?)\b/i);
+  const yd = text.match(/\b(\d{2,5})\s?(?:yds?|yards?)\b/i);
+  const m = text.match(/\b(\d{2,5})\s?(?:m|meters?|metres?)\b/i);
+  return {
+    grams: g ? Number(g[1]) : null,
+    yards: yd ? Number(yd[1]) : (m ? Math.round(Number(m[1]) * YD_PER_M) : null)
+  };
+}
+function orderWeight(text){
+  const t = ' ' + text.toLowerCase() + ' ';
+  // Most specific first (super bulky before bulky, light fingering before fingering…).
+  const order = ['Super Bulky','Lace','Fingering','Sport','DK','Worsted','Bulky'];
+  for(const w of order){
+    const names = [w.toLowerCase(), ...((WEIGHT_META[w]&&WEIGHT_META[w].aliases)||[])].filter(n=>!['fine','craft','baby','thread'].includes(n));
+    if(names.some(n=>new RegExp('[^a-z]'+n.replace(/[-]/g,'[- ]?')+'[^a-z]').test(t))) return w;
+  }
+  return null;
+}
+function guessColorHex(colorway){
+  const t = (colorway||'').toLowerCase();
+  if(!t) return null;
+  const synonyms = { gray:'Grey', grey:'Grey', rose:'Dusty rose', natural:'Cream', oatmeal:'Beige', denim:'Blue', mint:'Aqua', violet:'Purple', scarlet:'Red', crimson:'Red', ochre:'Mustard', sand:'Beige', ecru:'Cream', khaki:'Olive' };
+  const named = [...COLOR_NAMES].sort((a,b)=>b[0].length-a[0].length);
+  for(const [name,hex] of named){ if(new RegExp('\\b'+name.toLowerCase()+'\\b').test(t)) return hex; }
+  for(const [word,name] of Object.entries(synonyms)){
+    if(new RegExp('\\b'+word+'\\b').test(t)){ const c = COLOR_NAMES.find(([n])=>n===name); if(c) return c[1]; }
+  }
+  return null;
+}
+function knownBrandList(){
+  const brands = new Set([...presetBrands(), ...((typeof STATE!=='undefined' && STATE.yarns) ? STATE.yarns.map(y=>y.brand) : [])].filter(Boolean));
+  return [...brands].sort((a,b)=>b.length-a.length);
+}
+function containsWord(text, word){
+  const t = text.toLowerCase(), w = word.toLowerCase();
+  let i = t.indexOf(w);
+  while(i>=0){
+    const before = t[i-1], after = t[i+w.length];
+    if((!before || !/[a-z0-9]/.test(before)) && (!after || !/[a-z0-9]/.test(after))) return true;
+    i = t.indexOf(w, i+1);
+  }
+  return false;
+}
+// Full brand name first; then a short form ("Cascade" for "Cascade Yarns").
+function findBrandIn(text, brands){
+  const full = brands.find(b=>containsWord(text, b));
+  if(full) return full;
+  return brands.find(b=>{
+    const short = b.replace(/\s+(yarns?|brand|wool company|company|co\.?)$/i,'').trim();
+    return short!==b && short.length>=4 && containsWord(text, short);
+  }) || null;
+}
+// Split a product title into brand / line / colorway, with preset specs.
+function parseOrderTitle(title, brands){
+  // Drop quantity markers and spec groups like "(100g, 220 yds)" — specs are
+  // read separately from the whole line.
+  let t = title.replace(/\s*\|\s*/g,' ')
+    .replace(/\(([^()]*\d\s?(?:g|gr|grams?|yds?|yards?|m|meters?|metres?)\b[^()]*)\)/gi,' ')
+    .replace(/\s*[x×]\s*\d{1,3}\b(?!\s*(?:g|gr|grams?|m|yds?|yards?|mm|cm)\b)/gi,' ')
+    .replace(/\b(?:qty|quantity)\s*:?\s*\d+\b/gi,' ')
+    .replace(/\s+/g,' ').trim();
+  const brand = findBrandIn(t, brands);
+  let colorway = null;
+  const paren = t.match(/\(([^()]*[A-Za-z][^()]*)\)\s*$/);
+  if(paren && !/\d\s?(g|yds?|m)\b/i.test(paren[1])){ colorway = paren[1].trim(); t = t.slice(0, paren.index).trim(); }
+  if(!colorway){
+    const parts = t.split(/\s+[-–—\/]\s+|,\s+(?:colou?r|shade)\s*:?\s*/i);
+    if(parts.length>1){ colorway = parts.pop().trim(); t = parts.join(' - ').trim(); }
+  }
+  let line = t;
+  let preset = null;
+  let guessedBrand = null;
+  if(!brand){
+    // Unknown brand: product titles almost always start with it ("Scheepjes
+    // Catona", "Paintbox Yarns Simply DK") — a guess the user can edit.
+    const w = t.split(' ');
+    if(w.length>=2){
+      const n = /^yarns?$/i.test(w[1]) && w.length>=3 ? 2 : 1;
+      guessedBrand = w.slice(0,n).join(' ');
+      line = w.slice(n).join(' ');
+    }
+  }
+  if(brand){
+    const lines = presetLinesForBrand(brand).sort((a,b)=>b.line.length-a.line.length);
+    preset = lines.find(p=>t.toLowerCase().includes(p.line.toLowerCase())) || null;
+    const short = brand.replace(/\s+(yarns?|brand|wool company|company|co\.?)$/i,'').trim();
+    const strip = new RegExp('\\b(' + [brand, short].map(b=>b.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('|') + ')\\b','i');
+    line = preset ? preset.line : t.replace(strip,'');
+  }
+  line = line.replace(/\b\d{2,5}\s?(?:g|gr|grams?|yds?|yards?|m|meters?|metres?)\b/gi,'')
+             .replace(/\b(?:qty|quantity)\s*:?\s*\d+\b/gi,'').replace(/[x×]\s*\d{1,3}\b/g,'')
+             .replace(/\s*[-–—,:]\s*$/,'').replace(/^\s*[-–—,:]\s*/,'').replace(/\s+/g,' ').trim();
+  if(colorway && /^\s*$/.test(colorway)) colorway = null;
+  return { brand: brand || guessedBrand, knownBrand: !!brand, line, colorway, preset };
+}
+// Pure: text → { store, date, items[] }. Each item carries a score; higher
+// means more yarn-like signals (brand, yarn words, qty, price, colorway).
+function parseOrderText(text, opts={}){
+  const brands = opts.brands || knownBrandList();
+  const lines = (text||'').split(/\r?\n/).map(l=>l.replace(/\s+/g,' ').trim()).filter(l=>l && l!=='|' && /[A-Za-z0-9]/.test(l));
+  const items = [];
+  let cur = null, curAge = 0;
+  for(const raw of lines){
+    const line = raw.replace(/^\|\s*|\s*\|$/g,'').trim();
+    const attr = line.match(ORDER_ATTR_RE);
+    if(attr && cur){
+      const key = attr[1].toLowerCase(), val = attr[3].trim();
+      if(/^colou?r|shade|col/.test(key) && val && !cur.colorway) cur.colorway = val.replace(/\s*\|.*$/,'');
+      else if(/lot/.test(key) && val) cur.dyeLot = val.split(/\s*\|/)[0];
+      else if(/qty|quantity/.test(key) && /^\d/.test(val)) cur.quantity = Number(val.match(/\d+/)[0]);
+      else if(/weight|size|variant|option/.test(key)){ const w = orderWeight(val); if(w && !cur.weightCategory) cur.weightCategory = w; }
+      const p = orderPrices(line);
+      if(p.length){ if(/^(unit )?price/.test(key) || /\b(each|ea\.?|per)\b/i.test(line)) cur._unit = p[0]; else cur._prices.push(...p); }
+      cur.score += 1; curAge++;
+      continue;
+    }
+    const brand = findBrandIn(line, brands);
+    if(ORDER_SKIP_RE.test(line) && !brand){ cur = null; continue; }
+    // A short plain line straight after a product title is usually its
+    // variant/colorway (Shopify puts "Teal Feather" or "Worsted / Teal" on
+    // its own line) — even if it contains a yarn word like "worsted".
+    if(cur && curAge===0 && !brand && !cur.colorway && /^[A-Za-z][A-Za-z0-9 '’&\/.-]{1,40}$/.test(line) && !/\d{2,}/.test(line)){
+      const parts = line.split(/\s*\/\s*/);
+      const w = parts.map(orderWeight).find(Boolean); if(w && !cur.weightCategory) cur.weightCategory = w;
+      const name = parts.filter(x=>!orderWeight(x)).join(' / ').trim();
+      if(name) cur.colorway = name;
+      curAge++; cur.score += 1;
+      continue;
+    }
+    const sp0 = orderSpecs(line);
+    const yarnish = YARN_WORD_RE.test(line) || !!(sp0.grams || sp0.yards);
+    const looksLikeTitle = line.length>=4 && line.length<=140 && /[A-Za-z]{3}/.test(line) && !/^\s*[\d$£€.,|\s]+$/.test(line);
+    if(looksLikeTitle && (brand || yarnish)){
+      const cells = line.split(/\s*\|\s*/).filter(Boolean);
+      const title = cells[0];
+      const t = parseOrderTitle(title, brands);
+      cur = {
+        raw: line, brand: t.brand || '', knownBrand: t.knownBrand, line: t.line, colorway: t.colorway, preset: t.preset,
+        quantity: orderQty(line), _prices: orderPrices(line), dyeLot: null,
+        weightCategory: null, specs: orderSpecs(line), score: (brand?2:0) + (yarnish?1:0) - (NON_YARN_RE.test(title)?3:0)
+      };
+      // Bare quantity cell in a table row ("Rios | 2 | $28.00").
+      if(cur.quantity==null){ const q = cells.slice(1).find(c=>/^\d{1,3}$/.test(c)); if(q) cur.quantity = Number(q); }
+      items.push(cur); curAge = 0;
+      continue;
+    }
+    // Free-form detail lines just below a title (qty/price/specs).
+    // Any other line with real words is something else (a product we don't
+    // recognise, a note…) — stop attaching details to the current item.
+    const leftover = line.replace(PRICE_RE,' ').replace(/\b(?:qty|quantity|each|ea|per|unit|price|x|×)\b/gi,' ')
+      .replace(/\b\d{1,5}\s?(?:g|gr|grams?|yds?|yards?|m|meters?|metres?)\b/gi,' ');
+    if(cur && /[A-Za-z]{3,}/.test(leftover) && !orderWeight(line)){ cur = null; continue; }
+    if(cur && curAge < 4){
+      const q = orderQty(line); if(q!=null && cur.quantity==null) cur.quantity = q;
+      const p = orderPrices(line);
+      if(p.length){ if(/\b(each|ea\.?|per)\b/i.test(line)) cur._unit = p[0]; else cur._prices.push(...p); }
+      const sp = orderSpecs(line); if(sp.grams && !cur.specs.grams) cur.specs.grams = sp.grams; if(sp.yards && !cur.specs.yards) cur.specs.yards = sp.yards;
+      const w = orderWeight(line); if(w && !cur.weightCategory) cur.weightCategory = w;
+      curAge++;
+    }
+  }
+  const out = items.map(it=>{
+    const qty = it.quantity || 1;
+    let cost = null;
+    if(it._unit!=null) cost = it._unit;
+    else if(it._prices.length){
+      // Two prices with qty>1 → the smaller is the unit price; a single price
+      // with qty>1 is usually the line total.
+      cost = it._prices.length>1 ? Math.min(...it._prices) : (qty>1 ? it._prices[0]/qty : it._prices[0]);
+      cost = Math.round(cost*100)/100;
+    }
+    const pr = it.preset;
+    const score = it.score + (it.quantity?1:0) + (it._prices.length||it._unit!=null?1:0) + (it.colorway?1:0);
+    return {
+      brand: it.brand, line: it.line || (pr ? pr.line : ''), colorway: it.colorway || '', dyeLot: it.dyeLot || '',
+      quantity: qty, cost,
+      weightCategory: it.weightCategory || (pr && pr.weightCategory) || orderWeight(it.raw) || '',
+      fiber: (pr && pr.fiber) || '',
+      skeinWeightGrams: it.specs.grams || (pr && pr.skeinWeightGrams) || null,
+      skeinYardage: it.specs.yards || (pr && pr.skeinYardage) || null,
+      colorHex: guessColorHex(it.colorway),
+      score, include: score >= 4 || (it.knownBrand && score >= 3)
+    };
+  }).filter(it=>it.score>=2 && (it.line || it.brand));
+  // Store and order date.
+  let store = opts.from ? opts.from.replace(/<[^>]*>/,'').replace(/"/g,'').trim() : '';
+  if(!store){ const m = (text||'').match(/thank you for (?:your order|shopping|ordering)(?: with| from| at)\s+([A-Z][\w&' .-]{1,40}?)[!.,\n]/i); if(m) store = m[1].trim(); }
+  let date = null;
+  const dm = opts.date || ((text||'').match(/\b(?:order(?:ed)?|purchase|placed)(?: date| on)?\s*:?\s*([A-Z][a-z]{2,8}\.? \d{1,2},? \d{4}|\d{1,2} [A-Z][a-z]{2,8} \d{4}|\d{4}-\d{2}-\d{2}|\d{1,2}\/\d{1,2}\/\d{2,4})/i)||[])[1];
+  if(dm){ const d = new Date(dm); if(!isNaN(d)) date = d.toISOString().slice(0,10); }
+  return { store, date, items: out };
+}
+
+/* ---- Reading files ---- */
+let _pdfjsLoading = null;
+function ensurePdfjsLoaded(){
+  if(typeof pdfjsLib !== 'undefined') return Promise.resolve();
+  if(_pdfjsLoading) return _pdfjsLoading;
+  _pdfjsLoading = new Promise((resolve, reject)=>{
+    const s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+    s.onload = () => { pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'; resolve(); };
+    s.onerror = () => { _pdfjsLoading = null; reject(new Error('load failed')); };
+    document.head.appendChild(s);
+  });
+  return _pdfjsLoading;
+}
+async function pdfToText(file, setStatus){
+  await ensurePdfjsLoaded();
+  const pdf = await pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise;
+  const pages = Math.min(pdf.numPages, 10);
+  let text = '';
+  for(let n=1; n<=pages; n++){
+    const page = await pdf.getPage(n);
+    const content = await page.getTextContent();
+    // Rebuild lines from positioned text runs; wide gaps become " | ".
+    const rows = new Map();
+    content.items.forEach(it=>{
+      const y = Math.round(it.transform[5]);
+      const key = [...rows.keys()].find(k=>Math.abs(k-y)<=2) ?? y;
+      if(!rows.has(key)) rows.set(key, []);
+      rows.get(key).push({ x: it.transform[4], w: it.width||0, s: it.str });
+    });
+    [...rows.entries()].sort((a,b)=>b[0]-a[0]).forEach(([,runs])=>{
+      runs.sort((a,b)=>a.x-b.x);
+      let line = '', end = null;
+      runs.forEach(r=>{ if(end!=null) line += (r.x - end > 25) ? ' | ' : (r.x - end > 1 ? ' ' : ''); line += r.s; end = r.x + r.w; });
+      text += line + '\n';
+    });
+  }
+  if(text.replace(/[\s|]/g,'').length >= 30) return text;
+  // Scanned PDF (no text layer): render pages and read them like a photo.
+  let ocr = '';
+  for(let n=1; n<=Math.min(pdf.numPages, 3); n++){
+    if(setStatus) setStatus(`Reading scanned page ${n}…`);
+    const page = await pdf.getPage(n);
+    const viewport = page.getViewport({ scale: 2 });
+    const canvas = document.createElement('canvas');
+    canvas.width = viewport.width; canvas.height = viewport.height;
+    await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+    const blob = await new Promise(r=>canvas.toBlob(r, 'image/png'));
+    ocr += await imageToText(blob, setStatus) + '\n';
+  }
+  return ocr;
+}
+async function imageToText(blob, setStatus){
+  await ensureTesseractLoaded();
+  const { data } = await Tesseract.recognize(blob, 'eng', {
+    logger: m => { if(setStatus && m.status==='recognizing text') setStatus(`Reading… ${Math.round(m.progress*100)}%`); }
+  });
+  return data.text || '';
+}
+
+/* ---- UI ---- */
+function openOrderImport(){
+  if(!STATE.online){ wgToast("You're offline — view-only until you reconnect.", "error"); return; }
+  cleanupOpenForms();
+  STATE.tab = 'stash';
+  STATE.orderImport = { items: null, store:'', date:'' };
+  render();
+}
+function closeOrderImport(){ STATE.orderImport = null; renderTab(); }
+function setImportStatus(t){ const el = document.getElementById('imp-status'); if(el) el.textContent = t || ''; }
+async function readOrderFromInputs(fileList){
+  const file = fileList && fileList[0];
+  let text = '', from = '', date = null;
+  try{
+    if(file){
+      const name = (file.name||'').toLowerCase();
+      if(/\.eml$/.test(name) || /message\/rfc822/.test(file.type||'')){
+        setImportStatus('Reading email…');
+        const e = parseEml(await file.text()); text = e.text; from = e.from; date = e.date;
+      } else if(/\.pdf$/.test(name) || /pdf/.test(file.type||'')){
+        setImportStatus('Loading PDF reader…');
+        text = await pdfToText(file, setImportStatus);
+      } else if(isAcceptableImageFile(file)){
+        setImportStatus('Loading text reader…');
+        text = await imageToText(await toRenderableImageBlob(file), setImportStatus);
+      } else if(/\.(txt|html?)$/.test(name) || /^text\//.test(file.type||'')){
+        const raw = await file.text();
+        text = /\.html?$/.test(name) || /html/.test(file.type||'') ? htmlToText(raw) : raw;
+      } else { wgToast('Use a .eml, PDF, image or text file.', 'error'); return; }
+    } else {
+      text = (document.getElementById('imp-text')||{}).value || '';
+      // A pasted raw email source (headers + MIME) gets decoded too.
+      if(/^(received|from|return-path|delivered-to|mime-version):/im.test(text) && /content-type:/i.test(text)){
+        const e = parseEml(text); text = e.text; from = e.from; date = e.date;
+      }
+    }
+  }catch(err){
+    console.error('Order import read failed', err);
+    setImportStatus('');
+    wgToast("Couldn't read that file — try pasting the email text instead.", 'error');
+    return;
+  }
+  setImportStatus('');
+  if(!text.trim()){ wgToast('Paste an order email or choose a file first.', 'error'); return; }
+  const res = parseOrderText(text, { from, date });
+  STATE.orderImport = { items: res.items.map(it=>({ ...it, id: uid(), colorHex: it.colorHex || '#B8B0BF', colorGuessed: !!it.colorHex })), store: res.store, date: res.date || todayStr() };
+  renderTab();
+  if(!res.items.length) wgToast("Didn't find any yarn in that order — you can add items by hand below.", 'error');
+}
+function importExistingMatch(it){
+  const k = s => (s||'').toLowerCase().trim();
+  return STATE.yarns.find(y=>k(y.brand)===k(it.brand) && k(y.line)===k(it.line) && k(y.colorway)===k(it.colorway) && k(it.colorway)) || null;
+}
+function updateImportItem(id, field, val){
+  const imp = STATE.orderImport; if(!imp || !imp.items) return;
+  imp.items = imp.items.map(it => it.id===id ? { ...it, [field]: val } : it);
+  if(field==='colorway' || field==='brand' || field==='line') renderTab();
+}
+function addImportRow(){
+  const imp = STATE.orderImport; if(!imp) return;
+  imp.items = [...(imp.items||[]), { id: uid(), brand:'', line:'', colorway:'', dyeLot:'', quantity:1, cost:null, weightCategory:'', fiber:'', skeinWeightGrams:null, skeinYardage:null, colorHex:'#B8B0BF', include:true }];
+  renderTab();
+}
+function renderImportItem(it){
+  const match = importExistingMatch(it);
+  const f = (field, attrs='') => `oninput="updateImportItem('${it.id}','${field}', this.value)" ${attrs}`;
+  return `<div class="card import-item ${it.include?'':'import-item-off'}">
+    <label class="row" style="gap:8px;">
+      <input type="checkbox" ${it.include?'checked':''} onchange="updateImportItem('${it.id}','include', this.checked); this.closest('.import-item').classList.toggle('import-item-off', !this.checked);" style="width:auto;" />
+      <input type="color" value="${esc(it.colorHex)}" ${f('colorHex')} title="${it.colorGuessed?'Color guessed from the colorway name — adjust if needed':'Pick the yarn color'}" aria-label="Yarn color" />
+      <strong class="grow" style="font-size:0.85rem;">${esc([it.brand, it.line].filter(Boolean).join(' ') || 'New item')}${it.colorway?` · ${esc(it.colorway)}`:''}</strong>
+    </label>
+    ${match ? `<p class="note ok-text" style="margin:6px 0 0;">Already in your stash — will add ${esc(it.quantity)} skein(s) to it.</p>` : ''}
+    <div class="import-grid">
+      <label class="field">Brand<input value="${esc(it.brand)}" onchange="updateImportItem('${it.id}','brand', this.value)" /></label>
+      <label class="field">Line<input value="${esc(it.line)}" onchange="updateImportItem('${it.id}','line', this.value)" /></label>
+      <label class="field">Colorway<input value="${esc(it.colorway)}" onchange="updateImportItem('${it.id}','colorway', this.value)" /></label>
+      <label class="field">Skeins<input type="number" min="1" step="1" value="${esc(it.quantity)}" ${f('quantity')} /></label>
+      <label class="field">Weight<select onchange="updateImportItem('${it.id}','weightCategory', this.value)"><option value="">—</option>${WEIGHTS.map(w=>`<option ${it.weightCategory===w?'selected':''}>${w}</option>`).join('')}</select></label>
+      <label class="field">g / skein<input type="number" min="0" value="${esc(it.skeinWeightGrams??'')}" ${f('skeinWeightGrams')} /></label>
+      <label class="field">${unitLabel()} / skein<input type="number" min="0" value="${it.skeinYardage ? toDisplayLength(it.skeinYardage) : ''}" oninput="updateImportItem('${it.id}','skeinYardage', fromInputLength(this.value))" /></label>
+      <label class="field">Cost / skein<input type="number" min="0" step="0.01" value="${esc(it.cost??'')}" ${f('cost')} /></label>
+    </div>
+  </div>`;
+}
+function renderOrderImport(){
+  const imp = STATE.orderImport;
+  if(!imp) return '';
+  if(!imp.items){
+    return `<div class="card mb-4 order-import">
+      <div class="row-between"><p class="no-margin" style="font-family:'Fraunces',serif; font-weight:600;">Import from an order email</p>
+        <button class="del-btn" onclick="closeOrderImport()" aria-label="Close">✕</button></div>
+      <p class="note" style="margin:6px 0 10px;">Paste your order confirmation, or choose a saved email (.eml), PDF receipt or screenshot. It's read on this device — nothing is uploaded — and you'll review everything before it's added.</p>
+      <textarea id="imp-text" rows="6" class="full-width" placeholder="Paste the order email here…"></textarea>
+      <div class="row mt-2">
+        <button class="btn btn-primary btn-small" onclick="readOrderFromInputs(null)">Find yarn</button>
+        <label class="btn btn-ghost btn-small" style="cursor:pointer;">${ICONS.upload} Choose file
+          <input type="file" accept=".eml,message/rfc822,.pdf,application/pdf,image/*,.heic,.heif,.txt,.html,text/plain,text/html" style="display:none;" onchange="readOrderFromInputs(this.files); this.value='';" />
+        </label>
+        <span id="imp-status" class="note"></span>
+      </div>
+    </div>`;
+  }
+  const n = imp.items.filter(i=>i.include).length;
+  return `<div class="card mb-4 order-import">
+    <div class="row-between"><p class="no-margin" style="font-family:'Fraunces',serif; font-weight:600;">Review your order</p>
+      <button class="del-btn" onclick="closeOrderImport()" aria-label="Close">✕</button></div>
+    <p class="note" style="margin:6px 0 10px;">Found ${imp.items.length} item${imp.items.length===1?'':'s'}. Check the details — colors are a guess from the colorway name. Unticked items are skipped.</p>
+    <div class="row mb-3">
+      <label class="field" style="flex:1; min-width:140px;">Store<input value="${esc(imp.store)}" oninput="STATE.orderImport.store=this.value" /></label>
+      <label class="field">Purchase date<input type="date" value="${esc(imp.date)}" oninput="STATE.orderImport.date=this.value" /></label>
+    </div>
+    <div class="stack-gap">${imp.items.map(renderImportItem).join('')}</div>
+    <div class="row mt-3">
+      <button class="btn btn-ghost btn-small" onclick="addImportRow()">${ICONS.plus} Add item</button>
+      <button class="btn btn-ghost btn-small" onclick="STATE.orderImport.items=null; renderTab();">Start over</button>
+      <span class="grow"></span>
+      <button class="btn btn-primary" onclick="commitOrderImport()">Add ${n} to stash</button>
+    </div>
+  </div>`;
+}
+function commitOrderImport(){
+  const imp = STATE.orderImport;
+  if(!imp || !imp.items) return;
+  const chosen = imp.items.filter(i=>i.include && (i.line||'').trim());
+  if(!chosen.length){ wgToast('Tick at least one item with a line name.', 'error'); return; }
+  const noWeight = chosen.find(i=>!i.weightCategory);
+  if(noWeight){ wgToast(`Pick a yarn weight for ${[noWeight.brand, noWeight.line].filter(Boolean).join(' ')}.`, 'error'); return; }
+  const now = new Date().toISOString();
+  let added = 0, merged = 0;
+  chosen.forEach(it=>{
+    const qty = Math.max(1, Math.round(Number(it.quantity)||1));
+    const skeinYd = Math.round(Number(it.skeinYardage)||0);
+    const match = importExistingMatch(it);
+    if(match){
+      STATE.yarns = STATE.yarns.map(y => y.id===match.id ? { ...y, quantity:(Number(y.quantity)||0)+qty, yardageRemaining:(Number(y.yardageRemaining)||0) + qty*(Number(y.skeinYardage)||skeinYd), updatedAt:now } : y);
+      merged++; return;
+    }
+    const brand = (it.brand||'').trim(), line = (it.line||'').trim();
+    const yarn = {
+      id: uid(), name: [brand, line].filter(Boolean).join(' '), brand, line,
+      colorway: (it.colorway||'').trim(), colorwayNumber:'', dyeLot: (it.dyeLot||'').trim(),
+      fiber: it.fiber || '', weightCategory: it.weightCategory,
+      skeinWeightGrams: Number(it.skeinWeightGrams)||0, skeinYardage: skeinYd, quantity: qty,
+      cost: it.cost===''||it.cost==null ? null : Number(it.cost),
+      purchaseDate: imp.date || null, purchasedFrom: (imp.store||'').trim() || null,
+      isMulticolor:false, colors:[], primaryIndex:0, matchMode:'simple', colorHex: it.colorHex || '#B8B0BF',
+      scraps: [], status:'available', allocatedTo:null, dateAdded: todayStr(), updatedAt: now
+    };
+    yarn.yardageRemaining = qty * skeinYd;
+    STATE.yarns.push(yarn);
+    added++;
+  });
+  persist();
+  STATE.orderImport = null;
+  renderTab();
+  scrollToTop();
+  wgToast([added ? `Added ${added} yarn${added===1?'':'s'}` : '', merged ? `topped up ${merged}` : ''].filter(Boolean).join(', ') + '.', 'success');
+}
+
+/* =================================================================
+   Pattern library. Each pattern keeps its details (designer, craft, yarn
+   weight, yardage, hook/needle, gauge, skill, tags, status, notes), a
+   source link, and any uploaded PDFs/images. Files go to Firebase Storage
+   under patterns/{uid}/{patternId}/ — only their URLs live in the user's
+   Firestore doc, which has a 1 MB limit. Uploads happen as files are
+   picked (draft id reserved up front, like project photos); removals are
+   deferred until save so Cancel never loses a file.
+================================================================= */
+const PATTERN_STATUSES = [['saved','Saved'],['queued','In my queue'],['made','Made it']];
+const PATTERN_SKILLS = ['Beginner','Easy','Intermediate','Experienced'];
+const PATTERN_FILE_MAX = 20 * 1024 * 1024;   // matches the Storage rule
+let pendingPatternFiles = [];        // files currently on the form ({url,name,type,size})
+let pendingPatternUploads = [];      // URLs uploaded during this form session
+let pendingPatternRemovals = [];     // URLs removed during this form session
+let pendingProjectPatternId = null;  // pattern a new project was started from
+
+function patternStatusLabel(v){ const s = PATTERN_STATUSES.find(([k])=>k===v); return s ? s[1] : 'Saved'; }
+function showPatternForm(id){
+  if(!STATE.online){ wgToast("You're offline — view-only until you reconnect.", "error"); return; }
+  cleanupOpenForms();
+  STATE.tab = 'patterns';
+  STATE.showPatternForm = true;
+  STATE.editingPatternId = id || uid();
+  const editing = id ? STATE.patterns.find(p=>p.id===id) : null;
+  pendingPatternFiles = editing ? (editing.files||[]).map(f=>({ ...f })) : [];
+  pendingPatternUploads = [];
+  pendingPatternRemovals = [];
+  render();
+}
+function hidePatternForm(){ cleanupOpenForms(); renderTab(); }
+// Called from cleanupOpenForms: drop files uploaded for a form that's being
+// discarded (they were never saved anywhere).
+function discardPatternDraftFiles(){
+  pendingPatternUploads.forEach(url => window.FB.deletePhoto(url));
+  pendingPatternFiles = []; pendingPatternUploads = []; pendingPatternRemovals = [];
+}
+function buildPatternFilesHTML(){
+  if(!pendingPatternFiles.length) return '';
+  return `<div class="scrap-chips mt-2">${pendingPatternFiles.map((f,i)=>`<span class="scrap-chip">
+    <a href="${esc(f.url)}" target="_blank" rel="noopener" class="pattern-file-link">${/pdf/i.test(f.type||'')?'📄':'🖼️'} ${esc(f.name)}</a>
+    <button type="button" onclick="removePatternFile(${i})" aria-label="Remove file">✕</button></span>`).join('')}</div>`;
+}
+function refreshPatternFiles(){
+  const el = document.getElementById('patf-files');
+  if(el) el.innerHTML = buildPatternFilesHTML();
+}
+function onPatternFileDrop(e){
+  e.preventDefault();
+  e.currentTarget.classList.remove('dragover');
+  uploadPatternFiles(e.dataTransfer && e.dataTransfer.files);
+}
+async function uploadPatternFiles(fileList){
+  const files = [...(fileList||[])];
+  if(!files.length || !STATE.user) return;
+  const statusEl = document.getElementById('patf-status');
+  for(const file of files){
+    const isPdf = /pdf/i.test(file.type||'') || /\.pdf$/i.test(file.name||'');
+    if(!isPdf && !isAcceptableImageFile(file)){ wgToast(`${file.name}: only PDFs and images can be uploaded.`, 'error'); continue; }
+    if(file.size > PATTERN_FILE_MAX){ wgToast(`${file.name} is over 20 MB.`, 'error'); continue; }
+    if(statusEl) statusEl.textContent = `Uploading ${file.name}…`;
+    try{
+      // HEIC photos are converted so every browser can open them; other
+      // images and PDFs upload untouched so pattern text stays sharp.
+      const blob = isPdf ? file : await toRenderableImageBlob(file);
+      const type = isPdf ? 'application/pdf' : (blob.type || file.type || 'image/jpeg');
+      const ext = isPdf ? 'pdf' : (type.split('/')[1] || 'jpg').replace('jpeg','jpg');
+      const safe = (file.name||'pattern').replace(/\.[^.]+$/,'').replace(/[^\w\- ]+/g,'').trim().slice(0,60) || 'pattern';
+      const url = await window.FB.uploadPatternFile(STATE.user.uid, STATE.editingPatternId, blob, `${uid().slice(0,8)}-${safe}.${ext}`, type);
+      pendingPatternFiles.push({ url, name: file.name || `${safe}.${ext}`, type, size: blob.size||file.size||0 });
+      pendingPatternUploads.push(url);
+    }catch(err){
+      console.error('Pattern upload failed', err);
+      wgToast(`Couldn't upload ${file.name} — try again.`, 'error');
+    }
+  }
+  if(statusEl) statusEl.textContent = '';
+  refreshPatternFiles();
+}
+function removePatternFile(i){
+  const f = pendingPatternFiles[i];
+  if(!f) return;
+  pendingPatternFiles.splice(i,1);
+  pendingPatternRemovals.push(f.url);
+  refreshPatternFiles();
+}
+function renderPatternForm(){
+  const editing = STATE.patterns.find(p=>p.id===STATE.editingPatternId) || null;
+  const v = (field, fallback='') => editing ? esc(editing[field] ?? fallback) : fallback;
+  const g = (editing && editing.gauge) || {};
+  const inner = `
+  <form class="card form-grid" onsubmit="handleSavePattern(event)" style="margin-bottom:22px;">
+    <label class="field">Pattern name
+      <input id="patf-name" required placeholder="Gardenia Shawl" value="${v('name')}" />
+    </label>
+    <label class="field">Designer (optional)
+      <input id="patf-designer" value="${v('designer')}" />
+    </label>
+    <label class="field">Craft
+      <select id="patf-craft">${[['knit','Knit'],['crochet','Crochet'],['other','Other']].map(([k,l])=>`<option value="${k}" ${(editing?editing.craft:'knit')===k?'selected':''}>${l}</option>`).join('')}</select>
+    </label>
+    <label class="field">Status
+      <select id="patf-status">${PATTERN_STATUSES.map(([k,l])=>`<option value="${k}" ${(editing?editing.status:'saved')===k?'selected':''}>${l}</option>`).join('')}</select>
+    </label>
+    <div class="field span2">
+      <span class="note field-label">Pattern files (PDFs or images, up to 20 MB each — private to you)</span>
+      <label class="photo-dropzone" style="max-width:none;" ondragover="event.preventDefault(); this.classList.add('dragover');" ondragleave="this.classList.remove('dragover');" ondrop="onPatternFileDrop(event)">
+        <span class="note">${ICONS.upload} Drop files here or tap to choose</span>
+        <input type="file" accept="application/pdf,.pdf,image/*,.heic,.heif" multiple style="display:none;" onchange="uploadPatternFiles(this.files); this.value='';" />
+      </label>
+      <span id="patf-status" class="note" style="font-size:0.75rem;"></span>
+      <div id="patf-files">${buildPatternFilesHTML()}</div>
+    </div>
+    <label class="field span2">Source link (optional)
+      <input id="patf-url" type="url" placeholder="https://www.ravelry.com/patterns/library/…" value="${v('sourceUrl')}" />
+    </label>
+    <label class="field">Yarn weight (optional)
+      <select id="patf-weight"><option value="">—</option>${WEIGHTS.map(w=>`<option value="${w}" ${editing&&editing.weightCategory===w?'selected':''}>${esc(weightLabel(w))}</option>`).join('')}</select>
+    </label>
+    <label class="field">Yardage needed (${unitLabel()}, optional)
+      <input id="patf-yardage" type="number" min="0" step="any" value="${editing && editing.yardage ? toDisplayLength(editing.yardage) : ''}" />
+    </label>
+    <label class="field">Hook / needle size (optional)
+      <input id="patf-needle" placeholder="e.g. 4.5 mm / US 7" value="${v('needleSize')}" />
+    </label>
+    <label class="field">Skill level (optional)
+      <select id="patf-skill"><option value="">—</option>${PATTERN_SKILLS.map(s=>`<option ${editing&&editing.skillLevel===s?'selected':''}>${s}</option>`).join('')}</select>
+    </label>
+    <div class="field span2">
+      <span class="note" style="display:block; margin-bottom:4px;">Gauge the pattern calls for (optional)</span>
+      <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap; font-size:0.8rem; color:var(--ink-soft);">
+        <input id="patf-gauge-sts" type="number" min="0" step="any" placeholder="18" style="width:60px;" value="${esc(g.sts??'')}" /> sts ×
+        <input id="patf-gauge-rows" type="number" min="0" step="any" placeholder="24" style="width:60px;" value="${esc(g.rows??'')}" /> rows per
+        <select id="patf-gauge-unit">
+          <option value="in" ${g.unit==='cm'?'':'selected'}>4 in</option>
+          <option value="cm" ${g.unit==='cm'?'selected':''}>10 cm</option>
+        </select>
+      </div>
+    </div>
+    <label class="field span2">Tags (optional, comma-separated)
+      <input id="patf-tags" placeholder="sweater, top-down, gift" value="${editing ? esc((editing.tags||[]).join(', ')) : ''}" />
+    </label>
+    <label class="field span2">Notes (optional)
+      <textarea id="patf-notes" rows="3" placeholder="Sizes, modifications, errata…">${v('notes')}</textarea>
+    </label>
+    <div class="span2 form-actions-inline row-end">
+      <button type="button" class="btn btn-ghost" onclick="hidePatternForm()">Cancel</button>
+      <button type="submit" class="btn btn-primary">${editing ? 'Save changes' : 'Add pattern'}</button>
+    </div>
+  </form>`;
+  return wrapFormForMobile(inner, editing ? 'Edit pattern' : 'Add pattern', 'submitPatternForm()', 'hidePatternForm()');
+}
+function submitPatternForm(){
+  const f = document.querySelector('#inner-tab-content form, .fullscreen-form form');
+  if(f) f.requestSubmit ? f.requestSubmit() : f.querySelector('[type=submit]').click();
+}
+function handleSavePattern(e){
+  if(e) e.preventDefault();
+  const name = document.getElementById('patf-name').value.trim();
+  if(!name) return;
+  const existing = STATE.patterns.find(p=>p.id===STATE.editingPatternId);
+  const gs = document.getElementById('patf-gauge-sts').value, gr = document.getElementById('patf-gauge-rows').value;
+  const yd = document.getElementById('patf-yardage').value;
+  const fields = {
+    name,
+    designer: document.getElementById('patf-designer').value.trim() || null,
+    craft: document.getElementById('patf-craft').value,
+    status: document.getElementById('patf-status').value,
+    sourceUrl: document.getElementById('patf-url').value.trim() || null,
+    weightCategory: document.getElementById('patf-weight').value || null,
+    yardage: yd==='' ? null : Math.round(fromInputLength(yd)),
+    needleSize: document.getElementById('patf-needle').value.trim() || null,
+    skillLevel: document.getElementById('patf-skill').value || null,
+    gauge: (gs==='' && gr==='') ? null : { sts: gs===''?null:Number(gs), rows: gr===''?null:Number(gr), unit: document.getElementById('patf-gauge-unit').value },
+    tags: document.getElementById('patf-tags').value.split(',').map(t=>t.trim()).filter(Boolean),
+    notes: document.getElementById('patf-notes').value.trim() || null,
+    files: pendingPatternFiles.map(f=>({ ...f })),
+    updatedAt: new Date().toISOString()
+  };
+  if(existing){
+    STATE.patterns = STATE.patterns.map(p => p.id===existing.id ? { ...p, ...fields } : p);
+  } else {
+    STATE.patterns.push({ id: STATE.editingPatternId, ...fields, createdAt: todayStr() });
+  }
+  // Files removed on the form are only deleted now that the change is saved.
+  pendingPatternRemovals.forEach(url => window.FB.deletePhoto(url));
+  pendingPatternFiles = []; pendingPatternUploads = []; pendingPatternRemovals = [];
+  persist();
+  STATE.showPatternForm = false;
+  STATE.editingPatternId = null;
+  renderTab();
+  scrollToTop();
+}
+async function deletePattern(id){
+  const pat = STATE.patterns.find(p=>p.id===id);
+  if(!pat) return;
+  if(!(await wgConfirm(`Delete "${pat.name}" and its uploaded files? This cannot be undone.`, {title:'Delete pattern', okLabel:'Delete', danger:true}))) return;
+  (pat.files||[]).forEach(f => window.FB.deletePhoto(f.url));
+  STATE.patterns = STATE.patterns.filter(p=>p.id!==id);
+  STATE.projects = STATE.projects.map(p => p.patternId===id ? { ...p, patternId:null } : p);
+  persist();
+  renderTab();
+}
+function updatePatternStatus(id, status){
+  STATE.patterns = STATE.patterns.map(p => p.id===id ? { ...p, status, updatedAt:new Date().toISOString() } : p);
+  persist();
+}
+/* Stash check: which single stash yarns of the pattern's weight have enough
+   length on their own. */
+function patternStashMatches(pat){
+  if(!pat.weightCategory || !pat.yardage) return null;
+  const same = STATE.yarns.filter(y=>y.weightCategory===pat.weightCategory && (Number(y.yardageRemaining)||0)>0);
+  const enough = same.filter(y=>(Number(y.yardageRemaining)||0) >= pat.yardage)
+    .sort((a,b)=>(Number(b.yardageRemaining)||0)-(Number(a.yardageRemaining)||0));
+  const best = same.slice().sort((a,b)=>(Number(b.yardageRemaining)||0)-(Number(a.yardageRemaining)||0))[0] || null;
+  return { enough, best, sameCount: same.length };
+}
+function renderPatternStashLine(pat){
+  const m = patternStashMatches(pat);
+  if(!m) return '';
+  if(m.enough.length){
+    return `<details class="note pattern-stash"><summary class="ok-text">🧶 ${m.enough.length} stash yarn${m.enough.length===1?' has':'s have'} enough</summary>
+      <div class="scrap-chips mt-1">${m.enough.slice(0,8).map(y=>`<span class="scrap-chip"><span class="dot" style="background:${y.colorHex}; width:9px; height:9px; border-radius:50%; display:inline-block;"></span> ${esc(yarnDisplayName(y))} (${toDisplayLength(y.yardageRemaining)} ${unitLabel()})&nbsp;</span>`).join('')}</div>
+    </details>`;
+  }
+  if(m.best) return `<p class="note pattern-stash no-margin">🧶 No single ${esc(pat.weightCategory)} yarn has ${toDisplayLength(pat.yardage)} ${unitLabel()} — most is ${esc(yarnDisplayName(m.best))} (${toDisplayLength(m.best.yardageRemaining)} ${unitLabel()})</p>`;
+  return `<p class="note pattern-stash no-margin">🧶 No ${esc(pat.weightCategory)} yarn in your stash yet</p>`;
+}
+/* Start a project from a pattern: open the project form pre-filled with the
+   pattern's name, hook/needle and gauge, linked back to the pattern. */
+function startProjectFromPattern(id){
+  const pat = STATE.patterns.find(p=>p.id===id);
+  if(!pat) return;
+  cleanupOpenForms();
+  STATE.tab = 'projects';
+  showProjectForm();
+  pendingProjectPatternId = pat.id;
+  if(pat.sourceUrl) pendingProjectLinks = [{ id: uid(), url: pat.sourceUrl, type:'link', title: pat.name, thumbnail:null }];
+  render();
+  const set = (elId, val) => { const el = document.getElementById(elId); if(el && val!=null) el.value = val; };
+  set('pf-name', pat.name);
+  set('pf-pattern', pat.name);
+  set('pf-needlesize', pat.needleSize);
+  if(pat.gauge){ set('pf-gauge-sts', pat.gauge.sts); set('pf-gauge-rows', pat.gauge.rows); set('pf-gauge-unit', pat.gauge.unit||'in'); }
+}
+/* Load the pattern's gauge into the calculator as the target to compare to. */
+function patternToGauge(id){
+  const pat = STATE.patterns.find(p=>p.id===id);
+  if(!pat) return;
+  const g = STATE.gauge;
+  if(pat.craft==='knit' || pat.craft==='crochet') g.craft = pat.craft;
+  if(pat.needleSize) g.needleSize = pat.needleSize;
+  if(pat.gauge){
+    gaugeSetUnit(pat.gauge.unit==='cm' ? 'cm' : 'in');
+    g.targetSts = pat.gauge.sts ?? '';
+    g.targetRows = pat.gauge.rows ?? '';
+  }
+  g._unitInit = true;
+  g.open = { ...(g.open||{}), compare:true };
+  switchTab('gauge');
+}
+function openPatternInLibrary(id){
+  const pat = STATE.patterns.find(p=>p.id===id);
+  if(!pat) return;
+  STATE.patternSearch = pat.name;
+  STATE.patternFilterStatus = 'all';
+  switchTab('patterns');
+}
+function renderPatternCard(pat){
+  const meta = [
+    pat.craft && pat.craft!=='other' ? (pat.craft==='crochet'?'Crochet':'Knit') : null,
+    pat.weightCategory ? weightLabel(pat.weightCategory) : null,
+    pat.yardage ? `${toDisplayLength(pat.yardage)} ${unitLabel()}` : null,
+    pat.needleSize ? `🪡 ${pat.needleSize}` : null,
+    pat.gauge && (pat.gauge.sts||pat.gauge.rows) ? `📐 ${pat.gauge.sts||'?'}×${pat.gauge.rows||'?'}/${pat.gauge.unit==='cm'?'10cm':'4in'}` : null,
+    pat.skillLevel
+  ].filter(Boolean);
+  const projects = STATE.projects.filter(p=>p.patternId===pat.id);
+  return `<div class="card pattern-card">
+    <div class="row-between" style="align-items:flex-start;">
+      <div class="grow">
+        <p class="project-name" style="font-family:'Fraunces',serif; font-weight:600; font-size:1rem;">${esc(pat.name)}</p>
+        ${pat.designer ? `<p class="note no-margin">by ${esc(pat.designer)}</p>` : ''}
+      </div>
+      <select class="status-select" onchange="updatePatternStatus('${pat.id}', this.value)" aria-label="Pattern status">
+        ${PATTERN_STATUSES.map(([k,l])=>`<option value="${k}" ${pat.status===k?'selected':''}>${l}</option>`).join('')}
+      </select>
+    </div>
+    ${meta.length ? `<p class="note" style="margin:6px 0 0;">${meta.map(esc).join(' · ')}</p>` : ''}
+    ${(pat.tags||[]).length ? `<div class="scrap-chips mt-1">${pat.tags.map(t=>`<button type="button" class="pattern-tag" onclick="setPatternSearch(${esc(JSON.stringify(t))}, true)">#${esc(t)}</button>`).join('')}</div>` : ''}
+    ${(pat.files||[]).length || pat.sourceUrl ? `<div class="link-strip">
+      ${(pat.files||[]).map(f=>`<a class="link-card generic" href="${esc(f.url)}" target="_blank" rel="noopener">${/pdf/i.test(f.type||'')?'📄':'🖼️'}<span class="link-title">${esc(f.name)}</span></a>`).join('')}
+      ${pat.sourceUrl ? `<a class="link-card generic" href="${esc(pat.sourceUrl)}" target="_blank" rel="noopener">${ICONS.link}<span class="link-title">${esc(linkHostname(pat.sourceUrl))}</span></a>` : ''}
+    </div>` : ''}
+    ${pat.notes ? renderProjectNotes(pat.notes) : ''}
+    ${renderPatternStashLine(pat)}
+    ${projects.length ? `<p class="note" style="margin:6px 0 0; font-size:0.72rem;">Projects: ${projects.map(p=>esc(p.name)).join(', ')}</p>` : ''}
+    <div class="row mt-3">
+      ${STATE.online ? `<button class="btn btn-ghost btn-small" onclick="startProjectFromPattern('${pat.id}')">${ICONS.sparkles} Start project</button>` : ''}
+      ${pat.gauge && (pat.gauge.sts||pat.gauge.rows) ? `<button class="btn btn-ghost btn-small" onclick="patternToGauge('${pat.id}')">📐 Check my gauge</button>` : ''}
+      <span class="grow"></span>
+      <span style="display:inline-flex; gap:4px;">
+        <button class="del-btn" onclick="showPatternForm('${pat.id}')" aria-label="Edit pattern">${ICONS.pencil}</button>
+        <button class="del-btn" onclick="deletePattern('${pat.id}')" aria-label="Delete pattern">${ICONS.trash}</button>
+      </span>
+    </div>
+  </div>`;
+}
+function linkHostname(url){ try{ return new URL(url).hostname.replace(/^www\./,''); }catch(e){ return 'Link'; } }
+function setPatternSearch(v, rerender){
+  STATE.patternSearch = v;
+  if(rerender){ renderTab(); return; }
+  const grid = document.getElementById('pattern-grid');
+  if(grid) grid.innerHTML = filteredSortedPatterns().map(renderPatternCard).join('');
+}
+function filteredSortedPatterns(){
+  let list = [...STATE.patterns];
+  const q = (STATE.patternSearch||'').toLowerCase().trim();
+  if(q) list = list.filter(p=>[p.name,p.designer,p.notes,...(p.tags||[])].filter(Boolean).some(f=>f.toLowerCase().includes(q)));
+  const fs = STATE.patternFilterStatus;
+  if(fs && fs!=='all') list = list.filter(p=>(p.status||'saved')===fs);
+  const fc = STATE.patternFilterCraft;
+  if(fc && fc!=='all') list = list.filter(p=>p.craft===fc);
+  const sort = STATE.patternSort || 'recent';
+  if(sort==='name') list.sort((a,b)=>a.name.localeCompare(b.name));
+  else if(sort==='updated') list.sort((a,b)=>updatedKey(b).localeCompare(updatedKey(a)));
+  else list.reverse();
+  return list;
+}
+function renderPatterns(){
+  let html = `<div class="row-between mb-4">
+    <p class="note">${STATE.patterns.length} pattern${STATE.patterns.length===1?'':'s'}</p>
+    ${!STATE.showPatternForm && STATE.online ? `<button class="btn btn-primary" onclick="showPatternForm()">${ICONS.plus} Add pattern</button>` : ''}
+  </div>`;
+  if(STATE.showPatternForm) html += renderPatternForm();
+  if(STATE.patterns.length===0){
+    html += `<div class="empty"><p class="title">Your pattern library is empty</p><p class="body">Save patterns you own or want to make — upload the PDF, note the yarn and gauge, and see what in your stash could work. Start a project from any pattern.</p></div>`;
+    return html;
+  }
+  html += `<div class="stash-controls">
+    <input type="text" placeholder="Search name, designer, tag…" value="${esc(STATE.patternSearch||'')}" oninput="setPatternSearch(this.value)" style="flex:1; min-width:140px;" aria-label="Search patterns" />
+    <select onchange="STATE.patternFilterStatus=this.value; renderTab();" aria-label="Filter by status">
+      ${[['all','All statuses'],...PATTERN_STATUSES].map(([k,l])=>`<option value="${k}" ${(STATE.patternFilterStatus||'all')===k?'selected':''}>${l}</option>`).join('')}
+    </select>
+    <select onchange="STATE.patternFilterCraft=this.value; renderTab();" aria-label="Filter by craft">
+      ${[['all','Knit & crochet'],['knit','Knit'],['crochet','Crochet'],['other','Other']].map(([k,l])=>`<option value="${k}" ${(STATE.patternFilterCraft||'all')===k?'selected':''}>${l}</option>`).join('')}
+    </select>
+    <select onchange="setSort('patternSort', this.value)" aria-label="Sort patterns">
+      ${[['recent','Newest'],['updated','Recently updated'],['name','Name A–Z']].map(([k,l])=>`<option value="${k}" ${(STATE.patternSort||'recent')===k?'selected':''}>${l}</option>`).join('')}
+    </select>
+  </div>`;
+  const shown = filteredSortedPatterns();
+  if(!shown.length) html += `<div class="empty"><p class="title">No matches</p><p class="body">No patterns match your search or filters.</p></div>`;
+  html += `<div class="pattern-grid" id="pattern-grid">${shown.map(renderPatternCard).join('')}</div>`;
+  return html;
 }
 
 function renderShopping(){
@@ -3712,6 +5162,15 @@ async function handleAddPreset(){
    then reacts to sign-in / sign-out for as long as the page is open.
 ================================================================= */
 function initApp(){
+  // Accessibility: announce toasts to screen readers, and add a skip link.
+  const toastRoot = document.getElementById('wg-toast-root');
+  if(toastRoot){ toastRoot.setAttribute('aria-live','polite'); toastRoot.setAttribute('aria-atomic','true'); }
+  if(!document.getElementById('wg-skip')){
+    const skip = document.createElement('a');
+    skip.id = 'wg-skip'; skip.className = 'wg-skip-link'; skip.href = '#app';
+    skip.textContent = 'Skip to content';
+    document.body.insertBefore(skip, document.body.firstChild);
+  }
   render(); // shows "Connecting…"
 
   // Re-render when crossing the mobile/desktop breakpoint so the layout
@@ -3754,6 +5213,7 @@ function initApp(){
       STATE.projects = (data && data.projects) || [];
       STATE.paletteSavedPalettes = (data && data.palettes) || [];
       STATE.shoppingList = (data && data.shoppingList) || [];
+      STATE.patterns = (data && data.patterns) || [];
 
       STATE.unitPref =
         (data && data.prefs && data.prefs.unitPref) || 'yd';
@@ -3764,6 +5224,11 @@ function initApp(){
       STATE.preferencesSetup =
         data && data.prefs &&
         data.prefs.preferencesSetup === true;
+
+      // Remembered sort choices (filters stay session-only).
+      STATE.stashSort = (data && data.prefs && data.prefs.stashSort) || 'recent';
+      STATE.projSort = (data && data.prefs && data.prefs.projSort) || 'recent';
+      STATE.patternSort = (data && data.prefs && data.prefs.patternSort) || 'recent';
 
       applyTheme();
 

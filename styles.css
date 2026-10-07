@@ -112,6 +112,21 @@
   .swatch{ width:28px; height:28px; border-radius:50%; flex-shrink:0; border:1px solid var(--border); }
   .yarn-name{ font-family:'Fraunces',serif; font-weight:600; margin:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .scrap-badge{ font-family:'Work Sans',sans-serif; font-size:0.6rem; font-weight:600; text-transform:uppercase; letter-spacing:0.04em; background:var(--sage,#8FAF7C); color:#fff; border-radius:4px; padding:1px 5px; vertical-align:middle; }
+  .onboard-grid{ display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:18px; text-align:left; }
+  @media (max-width:560px){ .onboard-grid{ grid-template-columns:1fr; } }
+  .onboard-card{ display:flex; flex-direction:column; gap:4px; background:var(--card); border:1px solid var(--border); border-radius:10px; padding:14px; }
+  .onboard-card strong{ font-family:'Fraunces',serif; font-size:0.95rem; }
+  .onboard-icon{ color:var(--plum); }
+  .onboard-icon .icon{ width:22px; height:22px; }
+  /* Accessibility: visible keyboard-focus ring on interactive elements
+     (mouse clicks don't trigger :focus-visible, so this only shows for
+     keyboard/AT users and doesn't change the mouse experience). */
+  a:focus-visible, button:focus-visible, input:focus-visible,
+  select:focus-visible, textarea:focus-visible, [tabindex]:focus-visible{
+    outline:2px solid var(--plum); outline-offset:2px; border-radius:4px;
+  }
+  .wg-skip-link{ position:absolute; left:-9999px; top:0; z-index:200; background:var(--plum); color:#fff; padding:10px 16px; border-radius:0 0 8px 0; }
+  .wg-skip-link:focus{ left:0; }
   .yarn-sub{ font-size:0.75rem; color:var(--ink-soft); margin:1px 0 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .del-btn{ background:none; border:none; color:var(--ink-soft); cursor:pointer; padding:2px; }
   .del-btn:hover{ color:var(--wine); }
@@ -201,6 +216,12 @@
 
   /* ---- In-app modal + toast (replaces all browser dialogs) ---- */
   .wg-modal-backdrop{ position:fixed; inset:0; z-index:90; background:rgba(30,25,40,0.45); display:flex; align-items:center; justify-content:center; padding:20px; opacity:0; pointer-events:none; transition:opacity 0.16s; }
+  #wg-lightbox{ background:rgba(20,16,26,0.88); }
+  .lightbox-inner{ position:relative; max-width:92vw; max-height:88vh; display:flex; flex-direction:column; align-items:center; gap:10px; }
+  .lightbox-img{ max-width:92vw; max-height:80vh; border-radius:10px; object-fit:contain; box-shadow:0 8px 40px rgba(0,0,0,0.5); }
+  .lightbox-controls{ display:flex; align-items:center; gap:14px; color:#fff; }
+  .lightbox-controls .note{ color:#fff; }
+  .lightbox-close{ position:absolute; top:-14px; right:-14px; width:34px; height:34px; border-radius:50%; background:#fff; color:var(--ink); border:none; font-size:1rem; cursor:pointer; box-shadow:0 2px 8px rgba(0,0,0,0.3); }
   .wg-modal-backdrop.open{ opacity:1; pointer-events:auto; }
   .wg-modal{ background:var(--card); border:1px solid var(--border); border-radius:14px; padding:20px; max-width:400px; width:100%; box-shadow:0 12px 40px rgba(0,0,0,0.25); transform:translateY(8px); transition:transform 0.16s; }
   .wg-modal-backdrop.open .wg-modal{ transform:translateY(0); }
@@ -602,3 +623,45 @@
     justify-content:flex-start;
   }
 }
+/* Project notes preview on the project list row */
+.project-notes{ margin:6px 0 0; }
+.project-notes summary{ cursor:pointer; overflow:hidden; text-overflow:ellipsis; }
+.project-notes-full{ white-space:pre-wrap; margin-top:4px; color:var(--ink); font-size:0.82rem; }
+textarea{ resize:vertical; }
+
+/* Gauge calculator */
+.gauge-field{ display:flex; flex-direction:column; gap:4px; font-size:0.85rem; color:var(--ink-soft); }
+.gauge-summary{ cursor:pointer; font-weight:600; font-family:'Fraunces',serif; }
+.gauge-swatch-grid{ display:grid; grid-template-columns:auto 80px auto 80px auto; gap:8px; align-items:center; color:var(--ink); margin-top:4px; }
+.gauge-swatch-grid input{ width:100%; }
+.gauge-result-card{ background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:12px; font-size:0.9rem; }
+
+/* Scraps (partial balls) */
+.scrap-editor{ background:rgba(255,255,255,0.4); border:1px dashed var(--border); border-radius:8px; padding:10px; }
+:root[data-theme="dark"] .scrap-editor{ background:transparent; }
+.scrap-line{ margin-top:8px; display:flex; flex-direction:column; gap:4px; }
+.scrap-chips{ display:flex; flex-wrap:wrap; gap:6px; }
+.scrap-chip{ display:inline-flex; align-items:center; gap:2px; border:1px solid var(--border); border-radius:999px; padding:1px 4px 1px 8px; font-size:0.72rem; background:var(--bg); color:var(--ink); }
+.scrap-chip button{ background:none; border:none; cursor:pointer; color:var(--ink-soft); font-size:0.68rem; padding:2px 4px; font-family:inherit; }
+.scrap-chip .scrap-chip-main{ color:var(--ink); font-size:0.72rem; padding:0; text-decoration:underline dotted; }
+
+/* Pattern library */
+.pattern-grid{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+@media (max-width:760px){ .pattern-grid{ grid-template-columns:minmax(0,1fr); } }
+.pattern-card{ min-width:0; display:flex; flex-direction:column; }
+.pattern-card .project-name{ margin:0; }
+.pattern-stash{ margin-top:8px; }
+.pattern-stash summary{ cursor:pointer; }
+.pattern-tag{ background:none; border:1px solid var(--border); border-radius:999px; padding:1px 8px; font-size:0.7rem; color:var(--ink-soft); cursor:pointer; font-family:inherit; }
+.pattern-file-link{ color:var(--ink); text-decoration:none; }
+.pattern-inline-link{ background:none; border:none; padding:0; font:inherit; color:var(--plum); cursor:pointer; text-decoration:underline dotted; }
+.pattern-inline-link .icon{ width:13px; height:13px; }
+
+/* Order import */
+.order-import textarea{ width:100%; }
+.import-item{ padding:12px; background:var(--bg); }
+.import-item-off{ opacity:0.5; }
+.import-grid{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; margin-top:8px; }
+.import-grid input, .import-grid select{ width:100%; min-width:0; }
+@media (max-width:760px){ .import-grid{ grid-template-columns:repeat(2,minmax(0,1fr)); } }
+.import-item input[type="color"]{ width:32px; height:28px; flex-shrink:0; }

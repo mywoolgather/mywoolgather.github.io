@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Woolgather — logic tests</title>
+<style>
+  body{ font-family: ui-monospace, Menlo, Consolas, monospace; max-width:760px; margin:24px auto; padding:0 16px; color:#2A2333; }
+  h1{ font-family: Georgia, serif; }
+  .pass{ color:#3E6B49; }
+  .fail{ color:#7A2F4B; font-weight:700; }
+  .row{ padding:3px 0; border-bottom:1px solid #eee; }
+  #summary{ font-size:1.1rem; font-weight:700; margin:16px 0; padding:12px; border-radius:8px; }
+  #summary.ok{ background:#e3efe3; color:#3E6B49; }
+  #summary.bad{ background:#f6e2e8; color:#7A2F4B; }
+</style>
+</head>
+<body>
+<h1>Woolgather logic tests</h1>
+<p>Runs the app's pure functions (color science, gauge, units, scrap, weight) against known values. No framework — just open this file. It stubs browser globals so app.js can load without booting the UI.</p>
+<div id="summary">Running…</div>
+<div id="results"></div>
+
+<!-- Stub the browser globals app.js touches at load, BEFORE loading it, so
+     importing the file defines its functions without starting the real app. -->
+<script>
+  window.STATE = { unitPref:'yd', yarns:[], projects:[] };
+  window.FB = null;                       // app guards on this; no auto-init
+  // no-op DOM bits app.js may call at module top-level
+  window.matchMedia = window.matchMedia || function(){ return { matches:false, addEventListener(){}, addListener(){} }; };
+</script>
+<script src="app.js"></script>
+
+<script>
+(function(){
+  const results = document.getElementById('results');
+  let passed = 0, failed = 0;
+
+  function ok(name, cond){
+    const div = document.createElement('div');
+    div.className = 'row ' + (cond ? 'pass' : 'fail');
+    div.textContent = (cond ? '✓ ' : '✗ FAIL — ') + name;
+    results.appendChild(div);
+    cond ? passed++ : failed++;
+  }
+  // approximate-equality for floats
+  const near = (a,b,tol=0.5)=>Math.abs(a-b)<=tol;
+
+  // --- Color science ---
+  try{
+    ok('deltaE2000 identical = 0', deltaE2000(hexToLab('#5C3A72'), hexToLab('#5C3A72')) === 0);
+    ok('deltaE2000 black vs white ≈ 100', near(deltaE2000(hexToLab('#000'), hexToLab('#fff')), 100, 1));
+    // Sharma et al. CIEDE2000 reference pair ≈ 2.0425
+    ok('CIEDE2000 Sharma reference ≈ 2.04', near(deltaE2000({L:50,a:2.6772,b:-79.7751},{L:50,a:0,b:-82.7485}), 2.0425, 0.02));
+    ok('nameColor sage', nameColor('#8FAF7C') === 'Sage green');
+    ok('nameColor plum', nameColor('#5C3A72') === 'Plum');
+    ok('nameColor navy', nameColor('#2a3a63') === 'Navy');
+    ok('hslToHex red', hslToHex(0,100,50).toLowerCase() === '#ff0000');
+  }catch(e){ ok('color science block threw: '+e.message, false); }
+
+  // --- Neutrals ---
+  try{
+    ok('neutral: grey', isNeutralYarn({colorHex:'#9098a1'}) === true);
+    ok('neutral: cream', isNeutralYarn({colorHex:'#efe7d3'}) === true);
+    ok('neutral: brown', isNeutralYarn({colorHex:'#6f4e37'}) === true);
+    ok('NOT neutral: sage', isNeutralYarn({colorHex:'#8faf7c'}) === false);
+    ok('NOT neutral: moss (muted green)', isNeutralYarn({colorHex:'#6f7d5a'}) === false);
+    ok('NOT neutral: rust', isNeutralYarn({colorHex:'#a8432a'}) === false);
+  }catch(e){ ok('neutrals block threw: '+e.message, false); }
+
+  // --- Weight adjacency (Aran merged into Worsted) ---
+  try{
+    ok('weight DK<->Worsted adjacent', weightCompatible('DK','Worsted') === true);
+    ok('weight DK<->Bulky NOT adjacent', weightCompatible('DK','Bulky') === false);
+    ok('weight Worsted<->Bulky adjacent', weightCompatible('Worsted','Bulky') === true);
+  }catch(e){ ok('weight block threw: '+e.message, false); }
+
+  // --- Units (yd canonical). STATE is module-scoped inside app.js and not
+  //     reachable here, so we test the conversion CONSTANT/math directly
+  //     rather than flipping the preference through the STATE wrappers. ---
+  try{
+    const YDPM = 1.0936133;
+    ok('220 yd ≈ 201 m', near(Math.round(220/YDPM), 201, 1));
+    ok('201 m ≈ 220 yd', near(Math.round(201*YDPM), 220, 1));
+    ok('toDisplayLength(220) yd-default = 220', toDisplayLength(220) === 220); // default pref is yd
+  }catch(e){ ok('units block threw: '+e.message, false); }
+
+  // --- Scrap weight->length: (grams/skeinG)*skeinYd ---
+  try{
+    const scrap = (g, sg, sy)=>Math.round((g/sg)*sy);
+    ok('scrap 33g of 100g/220yd ≈ 73', scrap(33,100,220) === 73);
+    ok('scrap 50g of 100g/210yd ≈ 105', scrap(50,100,210) === 105);
+  }catch(e){ ok('scrap block threw: '+e.message, false); }
+
+  // --- Gauge: sts per reference span, and cast-on ---
+  try{
+    const perRef = (sts, meas, unit)=>{ const per=sts/meas; const ref=unit==='cm'?10:4; return Math.round(per*ref*10)/10; };
+    ok('gauge 18 sts/4in = 18 per 4in', perRef(18,4,'in') === 18);
+    ok('gauge 9 sts/2in = 18 per 4in', perRef(9,2,'in') === 18);
+    ok('gauge 22 sts/10cm = 22 per 10cm', perRef(22,10,'cm') === 22);
+    ok('cast-on 4.5 sts/in × 20in = 90', countForSize(20, 18, 4) === 90);
+    // The proportion from the Instagram slides: 14 sts & 12 rows per 10 cm.
+    ok('slides: 25 cm wide at 14 sts/10cm = 35 sts', countForSize(25, 14, 10) === 35);
+    ok('slides: 30 cm long at 12 rows/10cm = 36 rows', countForSize(30, 12, 10) === 36);
+    ok('gaugeRate needs both inputs', gaugeRate(14, 0) === null && gaugeRate('', 10) === null);
+    ok('countForSize no swatch = null', countForSize(25, '', 10) === null);
+  }catch(e){ ok('gauge block threw: '+e.message, false); }
+
+  // --- Gauge helpers: multiples, pattern conversion, even shaping ---
+  try{
+    const m = nearestMultiples(35, 6, 2);   // valid: 32, 38
+    ok('multiple of 6+2 near 35 → 32 / 38', m.below===32 && m.above===38);
+    const exact = nearestMultiples(38, 6, 2);
+    ok('38 already fits 6+2', exact.below===38 && exact.above===38);
+    ok('multiple of 2 (even) near 35 → 34 / 36', (()=>{ const e=nearestMultiples(35,2,0); return e.below===34 && e.above===36; })());
+    ok('translate 80 sts @20/4in → @18/4in = 72', translateCount(80, 18/4, 20/4) === 72);
+    const inc = spreadShaping(60, 10, 'inc');
+    ok('60 sts +10 inc → 70, groups of 6', inc.result===70 && inc.groups.length===1 && inc.groups[0].size===6 && inc.groups[0].times===10);
+    const inc2 = spreadShaping(64, 10, 'inc');   // 4×7 + 6×6 = 64
+    ok('64 sts +10 inc → 4×7 + 6×6', inc2.groups[0].size===7 && inc2.groups[0].times===4 && inc2.groups[1].size===6 && inc2.groups[1].times===6);
+    const dec = spreadShaping(60, 12, 'dec');
+    ok('60 sts −12 dec → 48', dec.result===48 && dec.groups[0].size===5);
+    ok('too many decreases → error', !!spreadShaping(10, 6, 'dec').error);
+    ok('knit inc text', shapingRepeatText(6,'inc','knit') === 'K6, M1');
+    ok('crochet dec text', shapingRepeatText(5,'dec','crochet','sc') === '3 sc, sc2tog');
+    ok('US dc hint → UK tr', crochetTermHint('dc','us') === 'US dc = UK tr');
+    ok('UK dc hint → US sc', crochetTermHint('dc','uk').startsWith('UK dc = US sc'));
+  }catch(e){ ok('gauge helpers block threw: '+e.message, false); }
+
+  // --- Scraps: migration + recording usage from a new skein or a scrap ---
+  try{
+    const base = { skeinYardage:220, skeinWeightGrams:100, quantity:3 };
+    const legacy = normalizeLegacyYarn({ ...base, yardageRemaining:500 });     // 2 full + 60 yd partial
+    ok('migration: 500 of 3×220 → one 60 yd scrap', legacy.scraps.length===1 && legacy.scraps[0].yards===60);
+    ok('migration: whole skeins → no scraps', normalizeLegacyYarn({ ...base, yardageRemaining:660 }).scraps.length===0);
+    ok('migration: isScrap flag → scrap', normalizeLegacyYarn({ ...base, quantity:1, isScrap:true, yardageRemaining:73 }).scraps[0].yards===73);
+    ok('migration keeps existing scraps', normalizeLegacyYarn({ ...base, yardageRemaining:500, scraps:[] }).scraps.length===0);
+    const y = { ...base, yardageRemaining:660, scraps:[] };
+    const a = applyYarnUse(y, 50, 'new');
+    ok('use 50 from new skein → 170 yd scrap', a.yardageRemaining===610 && a.scraps.length===1 && a.scraps[0].yards===170);
+    ok('full skeins after → 2', fullSkeinCount(a)===2);
+    const b = applyYarnUse(a, 30, a.scraps[0].id);
+    ok('use 30 from that scrap → 140', b.scraps[0].yards===140 && b.yardageRemaining===580);
+    const c = applyYarnUse(b, 140, b.scraps[0].id);
+    ok('scrap used up disappears', c.scraps.length===0 && c.yardageRemaining===440);
+    const d = applyYarnUse(y, 300, 'new');   // opens 2 skeins: 440 − 300 = 140 left
+    ok('use 300 from new → 140 yd scrap', d.scraps[0].yards===140 && fullSkeinCount(d)===1);
+    const e = applyYarnUse({ ...base, yardageRemaining:485, scraps:[{id:'s',yards:45}] }, 50, 's');
+    ok('overflowing a scrap opens a new skein', e.yardageRemaining===435 && e.scraps.length===1 && e.scraps[0].yards===215);
+    ok('grams ↔ yards', gramsToYards(base, 33)===73 && yardsToGrams(base, 73)===33);
+  }catch(e){ ok('scraps block threw: '+e.message, false); }
+
+  // --- Order import (rule-based, no AI) ---
+  try{
+    const brands = ['Malabrigo','Drops','Cascade Yarns','Lion Brand','Knit Picks'];
+    const shopify = [
+      'Thank you for shopping with Fiber Haus!', 'Order #1042', 'Order summary',
+      'Malabrigo Rios × 2', 'Teal Feather', '$28.00',
+      'Drops Safran - Powder Blue × 5', '$11.00',
+      'Gift wrap', '$3.00',
+      'Subtotal $42.00', 'Shipping $5.00', 'Total $47.00'
+    ].join('\n');
+    const r1 = parseOrderText(shopify, { brands });
+    ok('shopify: finds 2 yarns (not gift wrap/totals)', r1.items.length===2);
+    const rios = r1.items[0];
+    ok('shopify: Rios ×2, colorway from variant line', rios.brand==='Malabrigo' && rios.line==='Rios' && rios.quantity===2 && rios.colorway==='Teal Feather');
+    ok('shopify: line total ÷ qty = $14/skein', rios.cost===14);
+    ok('shopify: preset fills weight & yardage', rios.weightCategory==='Worsted' && rios.skeinYardage===210);
+    const safran = r1.items[1];
+    ok('shopify: Safran ×5 Powder Blue $2.20', safran.line==='Safran' && safran.quantity===5 && safran.colorway==='Powder Blue' && safran.cost===2.2);
+    ok('shopify: store from thank-you line', r1.store==='Fiber Haus');
+    ok('color guessed from colorway', safran.colorHex && /^#/.test(safran.colorHex));
+
+    const html = '<html><body><p>Order date: March 3, 2026</p><table>'
+      + '<tr><th>Product</th><th>Quantity</th><th>Price</th></tr>'
+      + '<tr><td>Cascade 220 Superwash - Navy (100g, 220 yds)</td><td>3</td><td>$29.97</td></tr>'
+      + '<tr><td>Lion Brand Wool-Ease (Mustard)</td><td>1</td><td>$5.99</td></tr>'
+      + '<tr><td>Bamboo needle set</td><td>1</td><td>$12.00</td></tr>'
+      + '<tr><td>Subtotal</td><td></td><td>$47.96</td></tr></table></body></html>';
+    const r2 = parseOrderText(htmlToText(html), { brands });
+    const casc = r2.items.find(i=>i.brand==='Cascade Yarns');
+    ok('html table: Cascade short brand, qty 3, $9.99', casc && casc.quantity===3 && casc.cost===9.99 && casc.colorway==='Navy');
+    ok('html table: specs 100 g / 220 yd', casc && casc.skeinWeightGrams===100 && casc.skeinYardage===220);
+    ok('html table: Wool-Ease Mustard', r2.items.some(i=>i.line==='Wool-Ease' && i.colorway==='Mustard'));
+    ok('html table: order date parsed', r2.date==='2026-03-03');
+    ok('html table: needle set left unticked', !r2.items.some(i=>/needle/i.test(i.line) && i.include));
+
+    const eml = ['From: "Yarn Barn" <orders@yarnbarn.example>', 'Subject: =?UTF-8?Q?Your_order_=E2=9C=93?=',
+      'Date: Tue, 6 Oct 2026 10:00:00 +0000', 'MIME-Version: 1.0',
+      'Content-Type: multipart/alternative; boundary="b1"', '', '--b1',
+      'Content-Type: text/html; charset=utf-8', 'Content-Transfer-Encoding: quoted-printable', '',
+      '<table><tr><td>Knit Picks Wool of the Andes Worsted =E2=80=93 Cream</td><td>Qty: 4</td><td>$11=',
+      '.96</td></tr></table>', '--b1--', ''].join('\r\n');
+    const e = parseEml(eml);
+    ok('eml: decodes from/subject', e.from.includes('Yarn Barn') && e.subject==='Your order ✓');
+    const r3 = parseOrderText(e.text, { brands, from: e.from, date: e.date });
+    const kp = r3.items[0];
+    ok('eml: QP html → Knit Picks ×4 Cream $2.99', kp && kp.brand==='Knit Picks' && kp.quantity===4 && kp.colorway==='Cream' && kp.cost===2.99);
+    ok('eml: store from sender, date from header', r3.store==='Yarn Barn' && r3.date==='2026-10-06');
+    const uk = ['Your order has been received', 'Order number: 12345',
+      'Paintbox Yarns Simply DK', 'Colour: Pistachio Green', 'Quantity: 6', 'Price: £2.99',
+      'Scheepjes Catona 50g', 'Colour: 074 Mercury', 'Qty: 10', '£1.89 each',
+      'Order total £36.84'].join('\n');
+    const r4 = parseOrderText(uk, { brands });
+    ok('uk: two unknown-brand yarns found', r4.items.length===2);
+    const pb = r4.items[0], sc = r4.items[1];
+    ok('uk: Paintbox Yarns / Simply DK guessed, DK weight', pb.brand==='Paintbox Yarns' && pb.line==='Simply DK' && pb.weightCategory==='DK');
+    ok('uk: Colour/Quantity/Price lines → Pistachio Green ×6 £2.99', pb.colorway==='Pistachio Green' && pb.quantity===6 && pb.cost===2.99);
+    ok('uk: "each" price is per skein (×10 @ £1.89)', sc.quantity===10 && sc.cost===1.89 && sc.colorway==='074 Mercury' && sc.skeinWeightGrams===50);
+  }catch(e){ ok('order import block threw: '+e.message, false); }
+
+  // --- closenessPercent monotonic ---
+  try{
+    ok('closeness identical = 100', closenessPercent(0) === 100);
+    ok('closeness worse < better', closenessPercent(30) < closenessPercent(5));
+  }catch(e){ ok('closeness block threw: '+e.message, false); }
+
+  const sum = document.getElementById('summary');
+  sum.textContent = `${passed} passed, ${failed} failed`;
+  sum.className = failed === 0 ? 'ok' : 'bad';
+})();
+</script>
+</body>
+</html>
