@@ -889,8 +889,8 @@ function render(){
   const headerRight = window.WG_DEMO
     ? `<div class="header-actions">
          <span class="note">You're viewing a demo</span>
-         <a class="btn btn-primary btn-small" href="${window.WG_SIGNUP_URL || '/woolgather.html'}">Create your gathering</a>
-         <a class="btn btn-ghost btn-small" href="${window.WG_SIGNUP_URL || '/woolgather.html'}">Log in</a>
+         <a class="btn btn-primary btn-small" href="${window.WG_SIGNUP_URL || '/'}">Create your gathering</a>
+         <a class="btn btn-ghost btn-small" href="${window.WG_SIGNUP_URL || '/'}">Log in</a>
        </div>`
     : `<div class="header-actions">
          <span class="note">${esc(STATE.user.displayName || STATE.user.email || 'Signed in')}</span>
@@ -973,8 +973,8 @@ function renderSettingsSheet(){
         <div class="sheet-handle"></div>
         <p style="padding:2px 22px 10px; font-family:'Fraunces',serif; font-weight:600;">You're exploring the demo</p>
         <p class="note" style="padding:0 22px 12px;">Everything here is sample data — changes reset on refresh. Create a free account to build your own stash.</p>
-        <a class="btn btn-primary" style="margin:0 22px 8px; display:block; text-align:center;" href="${window.WG_SIGNUP_URL || '/woolgather.html'}">Sign up free</a>
-        <a class="btn btn-ghost" style="margin:0 22px 12px; display:block; text-align:center;" href="${window.WG_SIGNUP_URL || '/woolgather.html'}">Log in</a>
+        <a class="btn btn-primary" style="margin:0 22px 8px; display:block; text-align:center;" href="${window.WG_SIGNUP_URL || '/'}">Sign up free</a>
+        <a class="btn btn-ghost" style="margin:0 22px 12px; display:block; text-align:center;" href="${window.WG_SIGNUP_URL || '/'}">Log in</a>
         <div class="sheet-divider"></div>
         <button onclick="closeSettings(); openTipJar();">💛<span>Support the developer</span></button>
         <button onclick="closeSettings(); openAbout();">${ICONS.gear}<span>About Woolgather</span></button>

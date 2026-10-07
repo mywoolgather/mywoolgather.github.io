@@ -10,7 +10,7 @@
      requests pass straight through to the network.
 
    IMPORTANT — updating the app:
-   Bump CACHE_VERSION whenever you deploy a new woolgather.html (or any
+   Bump CACHE_VERSION whenever you deploy a new index.html (or any
    shell asset). The old cache is deleted on activate, so users get the
    new version instead of a stale one. This is the single most important
    line for avoiding "I deployed a fix but still see the old app".
@@ -22,7 +22,7 @@ const PHOTO_CACHE = `${CACHE_VERSION}-photos`;
 
 // Core files the app needs to boot. Same-origin assets only here.
 const SHELL_ASSETS = [
-  '/woolgather.html',
+  '/index.html',
   '/styles.css',
   '/app.js',
   '/firebase-init.js',
@@ -128,7 +128,7 @@ self.addEventListener('fetch', (event) => {
         const cache = await caches.open(SHELL_CACHE);
         return (
           (await cache.match(req, { ignoreSearch: true })) ||
-          (await cache.match('/woolgather.html', { ignoreSearch: true })) ||
+          (await cache.match('/index.html', { ignoreSearch: true })) ||
           (await cache.match('/', { ignoreSearch: true })) ||
           Response.error()
         );

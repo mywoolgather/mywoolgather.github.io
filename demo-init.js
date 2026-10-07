@@ -147,7 +147,7 @@
   window.dispatchEvent(new Event('firebase-ready'));
 
   // Where the "Sign up" / "Log in" buttons point. Set to your real app URL.
-  window.WG_SIGNUP_URL = 'https://mikaylanorton.com/woolgather.html';
+  window.WG_SIGNUP_URL = 'https://mywoolgather.com/';
 
   // ---- Prominent demo banner with a sign-up call to action ----
   window.addEventListener('DOMContentLoaded', () => {
