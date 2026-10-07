@@ -150,6 +150,65 @@
     ok('grams ↔ yards', gramsToYards(base, 33)===73 && yardsToGrams(base, 73)===33);
   }catch(e){ ok('scraps block threw: '+e.message, false); }
 
+  // --- Order import (rule-based, no AI) ---
+  try{
+    const brands = ['Malabrigo','Drops','Cascade Yarns','Lion Brand','Knit Picks'];
+    const shopify = [
+      'Thank you for shopping with Fiber Haus!', 'Order #1042', 'Order summary',
+      'Malabrigo Rios × 2', 'Teal Feather', '$28.00',
+      'Drops Safran - Powder Blue × 5', '$11.00',
+      'Gift wrap', '$3.00',
+      'Subtotal $42.00', 'Shipping $5.00', 'Total $47.00'
+    ].join('\n');
+    const r1 = parseOrderText(shopify, { brands });
+    ok('shopify: finds 2 yarns (not gift wrap/totals)', r1.items.length===2);
+    const rios = r1.items[0];
+    ok('shopify: Rios ×2, colorway from variant line', rios.brand==='Malabrigo' && rios.line==='Rios' && rios.quantity===2 && rios.colorway==='Teal Feather');
+    ok('shopify: line total ÷ qty = $14/skein', rios.cost===14);
+    ok('shopify: preset fills weight & yardage', rios.weightCategory==='Worsted' && rios.skeinYardage===210);
+    const safran = r1.items[1];
+    ok('shopify: Safran ×5 Powder Blue $2.20', safran.line==='Safran' && safran.quantity===5 && safran.colorway==='Powder Blue' && safran.cost===2.2);
+    ok('shopify: store from thank-you line', r1.store==='Fiber Haus');
+    ok('color guessed from colorway', safran.colorHex && /^#/.test(safran.colorHex));
+
+    const html = '<html><body><p>Order date: March 3, 2026</p><table>'
+      + '<tr><th>Product</th><th>Quantity</th><th>Price</th></tr>'
+      + '<tr><td>Cascade 220 Superwash - Navy (100g, 220 yds)</td><td>3</td><td>$29.97</td></tr>'
+      + '<tr><td>Lion Brand Wool-Ease (Mustard)</td><td>1</td><td>$5.99</td></tr>'
+      + '<tr><td>Bamboo needle set</td><td>1</td><td>$12.00</td></tr>'
+      + '<tr><td>Subtotal</td><td></td><td>$47.96</td></tr></table></body></html>';
+    const r2 = parseOrderText(htmlToText(html), { brands });
+    const casc = r2.items.find(i=>i.brand==='Cascade Yarns');
+    ok('html table: Cascade short brand, qty 3, $9.99', casc && casc.quantity===3 && casc.cost===9.99 && casc.colorway==='Navy');
+    ok('html table: specs 100 g / 220 yd', casc && casc.skeinWeightGrams===100 && casc.skeinYardage===220);
+    ok('html table: Wool-Ease Mustard', r2.items.some(i=>i.line==='Wool-Ease' && i.colorway==='Mustard'));
+    ok('html table: order date parsed', r2.date==='2026-03-03');
+    ok('html table: needle set left unticked', !r2.items.some(i=>/needle/i.test(i.line) && i.include));
+
+    const eml = ['From: "Yarn Barn" <orders@yarnbarn.example>', 'Subject: =?UTF-8?Q?Your_order_=E2=9C=93?=',
+      'Date: Tue, 6 Oct 2026 10:00:00 +0000', 'MIME-Version: 1.0',
+      'Content-Type: multipart/alternative; boundary="b1"', '', '--b1',
+      'Content-Type: text/html; charset=utf-8', 'Content-Transfer-Encoding: quoted-printable', '',
+      '<table><tr><td>Knit Picks Wool of the Andes Worsted =E2=80=93 Cream</td><td>Qty: 4</td><td>$11=',
+      '.96</td></tr></table>', '--b1--', ''].join('\r\n');
+    const e = parseEml(eml);
+    ok('eml: decodes from/subject', e.from.includes('Yarn Barn') && e.subject==='Your order ✓');
+    const r3 = parseOrderText(e.text, { brands, from: e.from, date: e.date });
+    const kp = r3.items[0];
+    ok('eml: QP html → Knit Picks ×4 Cream $2.99', kp && kp.brand==='Knit Picks' && kp.quantity===4 && kp.colorway==='Cream' && kp.cost===2.99);
+    ok('eml: store from sender, date from header', r3.store==='Yarn Barn' && r3.date==='2026-10-06');
+    const uk = ['Your order has been received', 'Order number: 12345',
+      'Paintbox Yarns Simply DK', 'Colour: Pistachio Green', 'Quantity: 6', 'Price: £2.99',
+      'Scheepjes Catona 50g', 'Colour: 074 Mercury', 'Qty: 10', '£1.89 each',
+      'Order total £36.84'].join('\n');
+    const r4 = parseOrderText(uk, { brands });
+    ok('uk: two unknown-brand yarns found', r4.items.length===2);
+    const pb = r4.items[0], sc = r4.items[1];
+    ok('uk: Paintbox Yarns / Simply DK guessed, DK weight', pb.brand==='Paintbox Yarns' && pb.line==='Simply DK' && pb.weightCategory==='DK');
+    ok('uk: Colour/Quantity/Price lines → Pistachio Green ×6 £2.99', pb.colorway==='Pistachio Green' && pb.quantity===6 && pb.cost===2.99);
+    ok('uk: "each" price is per skein (×10 @ £1.89)', sc.quantity===10 && sc.cost===1.89 && sc.colorway==='074 Mercury' && sc.skeinWeightGrams===50);
+  }catch(e){ ok('order import block threw: '+e.message, false); }
+
   // --- closenessPercent monotonic ---
   try{
     ok('closeness identical = 100', closenessPercent(0) === 100);

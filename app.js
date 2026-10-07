@@ -155,6 +155,7 @@ let STATE = {
   },
   stashSort: 'recent',
   patterns: [],                   // pattern library
+  orderImport: null,              // { items|null, store, date } while importing an order
   showPatternForm: false,
   editingPatternId: null,
   patternSearch: '',
@@ -1467,8 +1468,12 @@ function renderCharts(){
 function renderStash(){
   let html = `<div class="row-between mb-4">
     <p class="note">${STATE.yarns.length} skein${STATE.yarns.length===1?'':'s'} logged</p>
-    ${!STATE.showYarnForm ? `<button class="btn btn-primary" onclick="showYarnForm()">${ICONS.plus} Add yarn</button>` : ''}
+    ${!STATE.showYarnForm ? `<div class="row">
+      ${STATE.online && !STATE.orderImport ? `<button class="btn btn-ghost" onclick="openOrderImport()">${ICONS.upload} Import order</button>` : ''}
+      <button class="btn btn-primary" onclick="showYarnForm()">${ICONS.plus} Add yarn</button>
+    </div>` : ''}
   </div>`;
+  if(STATE.orderImport && !STATE.showYarnForm) html += renderOrderImport();
   if(STATE.showYarnForm) html += renderYarnForm();
   if(STATE.yarns.length===0){
     html += `<div class="empty"><p class="title">Your stash is empty</p><p class="body">Log a skein — its color, fiber, and yardage — and it'll start showing up across the app.</p></div>`;
@@ -4009,6 +4014,537 @@ function renderGauge(){
     </div>
     <div id="g-out-shape">${buildGaugeShapeHTML()}</div>`)}
   `;
+}
+
+/* =================================================================
+   Order import — read a purchase confirmation and turn the yarn in it into
+   stash entries. Input: pasted email text, a saved .eml file, a PDF receipt
+   or a screenshot/photo. Everything runs on this device with fixed rules
+   (no AI, nothing uploaded): find lines that look like yarn (known brands,
+   yarn words), pick up quantity, price, colorway, grams and length nearby,
+   fill in specs from the brand/line presets, then let the user review and
+   edit every item before anything is added.
+================================================================= */
+
+/* ---- .eml (MIME) decoding ---- */
+function decodeQuotedPrintableBytes(str){
+  const s = str.replace(/=\r?\n/g, '');
+  const bytes = [];
+  for(let i=0; i<s.length; i++){
+    if(s[i]==='=' && /^[0-9A-F]{2}$/i.test(s.substr(i+1,2))){ bytes.push(parseInt(s.substr(i+1,2),16)); i+=2; }
+    else { const c = s.charCodeAt(i); if(c<256) bytes.push(c); else bytes.push(...new TextEncoder().encode(s[i])); }
+  }
+  return new Uint8Array(bytes);
+}
+function decodeBytes(bytes, charset){
+  try{ return new TextDecoder((charset||'utf-8').toLowerCase()).decode(bytes); }
+  catch(e){ return new TextDecoder('utf-8').decode(bytes); }
+}
+function decodeBodyPart(body, encoding, charset){
+  encoding = (encoding||'').toLowerCase().trim();
+  if(encoding==='base64'){
+    try{
+      const bin = atob(body.replace(/[^A-Za-z0-9+/=]/g,''));
+      return decodeBytes(Uint8Array.from(bin, c=>c.charCodeAt(0)), charset);
+    }catch(e){ return ''; }
+  }
+  if(encoding==='quoted-printable') return decodeBytes(decodeQuotedPrintableBytes(body), charset);
+  return body;
+}
+// RFC 2047 encoded words in headers, e.g. =?UTF-8?Q?Your_order?=
+function decodeMimeHeader(v){
+  return (v||'').replace(/=\?([^?]+)\?([BQ])\?([^?]*)\?=/gi, (m, cs, enc, txt)=>{
+    if(enc.toUpperCase()==='B') return decodeBodyPart(txt, 'base64', cs);
+    return decodeBytes(decodeQuotedPrintableBytes(txt.replace(/_/g,' ')), cs);
+  }).replace(/\?=\s+=\?/g,'');
+}
+function splitMimeEntity(raw){
+  const m = raw.match(/\r?\n\r?\n/);
+  const headText = m ? raw.slice(0, m.index) : raw;
+  const body = m ? raw.slice(m.index + m[0].length) : '';
+  const headers = {};
+  headText.replace(/\r?\n[ \t]+/g, ' ').split(/\r?\n/).forEach(line=>{
+    const i = line.indexOf(':');
+    if(i>0){ const k = line.slice(0,i).trim().toLowerCase(); if(!(k in headers)) headers[k] = line.slice(i+1).trim(); }
+  });
+  return { headers, body };
+}
+function mimeParam(header, name){
+  const m = (header||'').match(new RegExp(name+'\\s*=\\s*("([^"]*)"|[^;\\s]+)', 'i'));
+  return m ? (m[2]!=null ? m[2] : m[1]) : null;
+}
+// Returns { plain, html } text collected from a MIME entity (recursive).
+function mimeEntityText(headers, body){
+  const ct = headers['content-type'] || 'text/plain';
+  if(/^multipart\//i.test(ct)){
+    const boundary = mimeParam(ct, 'boundary');
+    if(!boundary) return { plain: body, html: '' };
+    const parts = body.split(new RegExp('\\r?\\n?--' + boundary.replace(/[.*+?^${}()|[\]\\]/g,'\\$&') + '(?:--)?[ \\t]*\\r?\\n?'));
+    const out = { plain:'', html:'' };
+    parts.slice(1).forEach(p=>{
+      if(!p.trim()) return;
+      const e = splitMimeEntity(p);
+      if(/attachment/i.test(e.headers['content-disposition']||'')) return;
+      const t = mimeEntityText(e.headers, e.body);
+      out.plain += t.plain ? t.plain + '\n' : '';
+      out.html += t.html ? t.html + '\n' : '';
+    });
+    return out;
+  }
+  const text = decodeBodyPart(body, headers['content-transfer-encoding'], mimeParam(ct,'charset'));
+  if(/text\/html/i.test(ct)) return { plain:'', html:text };
+  if(/text\/plain/i.test(ct) || !/\//.test(ct)) return { plain:text, html:'' };
+  return { plain:'', html:'' };
+}
+// Table cells joined with " | " so a product, its quantity and price stay on
+// one line; block elements become line breaks.
+function htmlToText(html){
+  const marked = html
+    .replace(/<(style|script|head)[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<\/(td|th)>/gi, ' | ')
+    .replace(/<br\s*\/?>|<\/(tr|p|div|li|h[1-6]|table)>/gi, '\n');
+  const doc = new DOMParser().parseFromString(marked, 'text/html');
+  return (doc.body ? doc.body.textContent : '').replace(/ /g,' ');
+}
+function parseEml(raw){
+  const { headers, body } = splitMimeEntity(raw);
+  const t = mimeEntityText(headers, body);
+  // Plain text is usually laid out line-per-item; HTML is the fallback (or
+  // preferred when the plain part is a stub like "view this in a browser").
+  const plain = (t.plain||'').trim();
+  const text = plain.length > 200 || !t.html ? plain : htmlToText(t.html);
+  return { from: decodeMimeHeader(headers.from), subject: decodeMimeHeader(headers.subject), date: headers.date || null, text };
+}
+
+/* ---- Rules for finding yarn in order text ---- */
+const ORDER_SKIP_RE = /\b(sub-?total|grand total|total|shipping|delivery|postage|tax|vat|discount|coupon|promo|gift ?card|order (number|no\.?|#)|invoice|payment|paid|visa|mastercard|amex|paypal|billing|address|ship(ping)? to|bill to|tracking|unsubscribe|privacy|copyright|view in (your )?browser|customer service|reward|points|estimated|returns?)\b|©/i;
+const ORDER_ATTR_RE = /^(colou?r(way)?|shade|col\.?|dye ?lot|lot|qty|quantity|weight|size|variant|option|price|unit price|sku|item #?)\s*[:#.\-]\s*(.*)$/i;
+const NON_YARN_RE = /\b(needles?|hooks?|stitch markers?|notions|scissors|ruler|patterns?|books?|gift ?wrap|tote|blocking|mats?|swift|winder|buttons?)\b/i;
+const YARN_WORD_RE = /\b(yarns?|wool|merino|alpaca|mohair|cashmere|cotton|acrylic|silk|linen|bamboo|nylon|superwash|skeins?|hanks?|fingering|sock|sport|dk|worsted|aran|chunky|bulky|lace weight|ply|tweed|boucle|chenille)\b/i;
+const PRICE_RE = /(?:[$£€]|\b(?:USD|CAD|AUD|GBP|EUR)\s?)\s?(\d{1,4}(?:[.,]\d{2})?)|(\d{1,4}[.,]\d{2})\s?(?:USD|CAD|AUD|GBP|EUR|€|£)/gi;
+function orderPrices(line){
+  const out = []; let m; PRICE_RE.lastIndex = 0;
+  while((m = PRICE_RE.exec(line))) out.push(Number((m[1]||m[2]).replace(',','.')));
+  return out;
+}
+function orderQty(line){
+  let m = line.match(/\b(?:qty|quantity)\s*[:x]?\s*(\d{1,3})\b/i)
+       || line.match(/[x×]\s*(\d{1,3})\b(?!\s*(?:g|gr|grams?|m|yds?|yards?|mm|cm)\b)/i)
+       || line.match(/^\s*(\d{1,3})\s*[x×]\s/i);
+  return m ? Number(m[1]) : null;
+}
+function orderSpecs(text){
+  const g = text.match(/\b(\d{2,4})\s?(?:g|gr|grams?)\b/i);
+  const yd = text.match(/\b(\d{2,5})\s?(?:yds?|yards?)\b/i);
+  const m = text.match(/\b(\d{2,5})\s?(?:m|meters?|metres?)\b/i);
+  return {
+    grams: g ? Number(g[1]) : null,
+    yards: yd ? Number(yd[1]) : (m ? Math.round(Number(m[1]) * YD_PER_M) : null)
+  };
+}
+function orderWeight(text){
+  const t = ' ' + text.toLowerCase() + ' ';
+  // Most specific first (super bulky before bulky, light fingering before fingering…).
+  const order = ['Super Bulky','Lace','Fingering','Sport','DK','Worsted','Bulky'];
+  for(const w of order){
+    const names = [w.toLowerCase(), ...((WEIGHT_META[w]&&WEIGHT_META[w].aliases)||[])].filter(n=>!['fine','craft','baby','thread'].includes(n));
+    if(names.some(n=>new RegExp('[^a-z]'+n.replace(/[-]/g,'[- ]?')+'[^a-z]').test(t))) return w;
+  }
+  return null;
+}
+function guessColorHex(colorway){
+  const t = (colorway||'').toLowerCase();
+  if(!t) return null;
+  const synonyms = { gray:'Grey', grey:'Grey', rose:'Dusty rose', natural:'Cream', oatmeal:'Beige', denim:'Blue', mint:'Aqua', violet:'Purple', scarlet:'Red', crimson:'Red', ochre:'Mustard', sand:'Beige', ecru:'Cream', khaki:'Olive' };
+  const named = [...COLOR_NAMES].sort((a,b)=>b[0].length-a[0].length);
+  for(const [name,hex] of named){ if(new RegExp('\\b'+name.toLowerCase()+'\\b').test(t)) return hex; }
+  for(const [word,name] of Object.entries(synonyms)){
+    if(new RegExp('\\b'+word+'\\b').test(t)){ const c = COLOR_NAMES.find(([n])=>n===name); if(c) return c[1]; }
+  }
+  return null;
+}
+function knownBrandList(){
+  const brands = new Set([...presetBrands(), ...((typeof STATE!=='undefined' && STATE.yarns) ? STATE.yarns.map(y=>y.brand) : [])].filter(Boolean));
+  return [...brands].sort((a,b)=>b.length-a.length);
+}
+function containsWord(text, word){
+  const t = text.toLowerCase(), w = word.toLowerCase();
+  let i = t.indexOf(w);
+  while(i>=0){
+    const before = t[i-1], after = t[i+w.length];
+    if((!before || !/[a-z0-9]/.test(before)) && (!after || !/[a-z0-9]/.test(after))) return true;
+    i = t.indexOf(w, i+1);
+  }
+  return false;
+}
+// Full brand name first; then a short form ("Cascade" for "Cascade Yarns").
+function findBrandIn(text, brands){
+  const full = brands.find(b=>containsWord(text, b));
+  if(full) return full;
+  return brands.find(b=>{
+    const short = b.replace(/\s+(yarns?|brand|wool company|company|co\.?)$/i,'').trim();
+    return short!==b && short.length>=4 && containsWord(text, short);
+  }) || null;
+}
+// Split a product title into brand / line / colorway, with preset specs.
+function parseOrderTitle(title, brands){
+  // Drop quantity markers and spec groups like "(100g, 220 yds)" — specs are
+  // read separately from the whole line.
+  let t = title.replace(/\s*\|\s*/g,' ')
+    .replace(/\(([^()]*\d\s?(?:g|gr|grams?|yds?|yards?|m|meters?|metres?)\b[^()]*)\)/gi,' ')
+    .replace(/\s*[x×]\s*\d{1,3}\b(?!\s*(?:g|gr|grams?|m|yds?|yards?|mm|cm)\b)/gi,' ')
+    .replace(/\b(?:qty|quantity)\s*:?\s*\d+\b/gi,' ')
+    .replace(/\s+/g,' ').trim();
+  const brand = findBrandIn(t, brands);
+  let colorway = null;
+  const paren = t.match(/\(([^()]*[A-Za-z][^()]*)\)\s*$/);
+  if(paren && !/\d\s?(g|yds?|m)\b/i.test(paren[1])){ colorway = paren[1].trim(); t = t.slice(0, paren.index).trim(); }
+  if(!colorway){
+    const parts = t.split(/\s+[-–—\/]\s+|,\s+(?:colou?r|shade)\s*:?\s*/i);
+    if(parts.length>1){ colorway = parts.pop().trim(); t = parts.join(' - ').trim(); }
+  }
+  let line = t;
+  let preset = null;
+  let guessedBrand = null;
+  if(!brand){
+    // Unknown brand: product titles almost always start with it ("Scheepjes
+    // Catona", "Paintbox Yarns Simply DK") — a guess the user can edit.
+    const w = t.split(' ');
+    if(w.length>=2){
+      const n = /^yarns?$/i.test(w[1]) && w.length>=3 ? 2 : 1;
+      guessedBrand = w.slice(0,n).join(' ');
+      line = w.slice(n).join(' ');
+    }
+  }
+  if(brand){
+    const lines = presetLinesForBrand(brand).sort((a,b)=>b.line.length-a.line.length);
+    preset = lines.find(p=>t.toLowerCase().includes(p.line.toLowerCase())) || null;
+    const short = brand.replace(/\s+(yarns?|brand|wool company|company|co\.?)$/i,'').trim();
+    const strip = new RegExp('\\b(' + [brand, short].map(b=>b.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('|') + ')\\b','i');
+    line = preset ? preset.line : t.replace(strip,'');
+  }
+  line = line.replace(/\b\d{2,5}\s?(?:g|gr|grams?|yds?|yards?|m|meters?|metres?)\b/gi,'')
+             .replace(/\b(?:qty|quantity)\s*:?\s*\d+\b/gi,'').replace(/[x×]\s*\d{1,3}\b/g,'')
+             .replace(/\s*[-–—,:]\s*$/,'').replace(/^\s*[-–—,:]\s*/,'').replace(/\s+/g,' ').trim();
+  if(colorway && /^\s*$/.test(colorway)) colorway = null;
+  return { brand: brand || guessedBrand, knownBrand: !!brand, line, colorway, preset };
+}
+// Pure: text → { store, date, items[] }. Each item carries a score; higher
+// means more yarn-like signals (brand, yarn words, qty, price, colorway).
+function parseOrderText(text, opts={}){
+  const brands = opts.brands || knownBrandList();
+  const lines = (text||'').split(/\r?\n/).map(l=>l.replace(/\s+/g,' ').trim()).filter(l=>l && l!=='|' && /[A-Za-z0-9]/.test(l));
+  const items = [];
+  let cur = null, curAge = 0;
+  for(const raw of lines){
+    const line = raw.replace(/^\|\s*|\s*\|$/g,'').trim();
+    const attr = line.match(ORDER_ATTR_RE);
+    if(attr && cur){
+      const key = attr[1].toLowerCase(), val = attr[3].trim();
+      if(/^colou?r|shade|col/.test(key) && val && !cur.colorway) cur.colorway = val.replace(/\s*\|.*$/,'');
+      else if(/lot/.test(key) && val) cur.dyeLot = val.split(/\s*\|/)[0];
+      else if(/qty|quantity/.test(key) && /^\d/.test(val)) cur.quantity = Number(val.match(/\d+/)[0]);
+      else if(/weight|size|variant|option/.test(key)){ const w = orderWeight(val); if(w && !cur.weightCategory) cur.weightCategory = w; }
+      const p = orderPrices(line);
+      if(p.length){ if(/^(unit )?price/.test(key) || /\b(each|ea\.?|per)\b/i.test(line)) cur._unit = p[0]; else cur._prices.push(...p); }
+      cur.score += 1; curAge++;
+      continue;
+    }
+    const brand = findBrandIn(line, brands);
+    if(ORDER_SKIP_RE.test(line) && !brand){ cur = null; continue; }
+    // A short plain line straight after a product title is usually its
+    // variant/colorway (Shopify puts "Teal Feather" or "Worsted / Teal" on
+    // its own line) — even if it contains a yarn word like "worsted".
+    if(cur && curAge===0 && !brand && !cur.colorway && /^[A-Za-z][A-Za-z0-9 '’&\/.-]{1,40}$/.test(line) && !/\d{2,}/.test(line)){
+      const parts = line.split(/\s*\/\s*/);
+      const w = parts.map(orderWeight).find(Boolean); if(w && !cur.weightCategory) cur.weightCategory = w;
+      const name = parts.filter(x=>!orderWeight(x)).join(' / ').trim();
+      if(name) cur.colorway = name;
+      curAge++; cur.score += 1;
+      continue;
+    }
+    const sp0 = orderSpecs(line);
+    const yarnish = YARN_WORD_RE.test(line) || !!(sp0.grams || sp0.yards);
+    const looksLikeTitle = line.length>=4 && line.length<=140 && /[A-Za-z]{3}/.test(line) && !/^\s*[\d$£€.,|\s]+$/.test(line);
+    if(looksLikeTitle && (brand || yarnish)){
+      const cells = line.split(/\s*\|\s*/).filter(Boolean);
+      const title = cells[0];
+      const t = parseOrderTitle(title, brands);
+      cur = {
+        raw: line, brand: t.brand || '', knownBrand: t.knownBrand, line: t.line, colorway: t.colorway, preset: t.preset,
+        quantity: orderQty(line), _prices: orderPrices(line), dyeLot: null,
+        weightCategory: null, specs: orderSpecs(line), score: (brand?2:0) + (yarnish?1:0) - (NON_YARN_RE.test(title)?3:0)
+      };
+      // Bare quantity cell in a table row ("Rios | 2 | $28.00").
+      if(cur.quantity==null){ const q = cells.slice(1).find(c=>/^\d{1,3}$/.test(c)); if(q) cur.quantity = Number(q); }
+      items.push(cur); curAge = 0;
+      continue;
+    }
+    // Free-form detail lines just below a title (qty/price/specs).
+    // Any other line with real words is something else (a product we don't
+    // recognise, a note…) — stop attaching details to the current item.
+    const leftover = line.replace(PRICE_RE,' ').replace(/\b(?:qty|quantity|each|ea|per|unit|price|x|×)\b/gi,' ')
+      .replace(/\b\d{1,5}\s?(?:g|gr|grams?|yds?|yards?|m|meters?|metres?)\b/gi,' ');
+    if(cur && /[A-Za-z]{3,}/.test(leftover) && !orderWeight(line)){ cur = null; continue; }
+    if(cur && curAge < 4){
+      const q = orderQty(line); if(q!=null && cur.quantity==null) cur.quantity = q;
+      const p = orderPrices(line);
+      if(p.length){ if(/\b(each|ea\.?|per)\b/i.test(line)) cur._unit = p[0]; else cur._prices.push(...p); }
+      const sp = orderSpecs(line); if(sp.grams && !cur.specs.grams) cur.specs.grams = sp.grams; if(sp.yards && !cur.specs.yards) cur.specs.yards = sp.yards;
+      const w = orderWeight(line); if(w && !cur.weightCategory) cur.weightCategory = w;
+      curAge++;
+    }
+  }
+  const out = items.map(it=>{
+    const qty = it.quantity || 1;
+    let cost = null;
+    if(it._unit!=null) cost = it._unit;
+    else if(it._prices.length){
+      // Two prices with qty>1 → the smaller is the unit price; a single price
+      // with qty>1 is usually the line total.
+      cost = it._prices.length>1 ? Math.min(...it._prices) : (qty>1 ? it._prices[0]/qty : it._prices[0]);
+      cost = Math.round(cost*100)/100;
+    }
+    const pr = it.preset;
+    const score = it.score + (it.quantity?1:0) + (it._prices.length||it._unit!=null?1:0) + (it.colorway?1:0);
+    return {
+      brand: it.brand, line: it.line || (pr ? pr.line : ''), colorway: it.colorway || '', dyeLot: it.dyeLot || '',
+      quantity: qty, cost,
+      weightCategory: it.weightCategory || (pr && pr.weightCategory) || orderWeight(it.raw) || '',
+      fiber: (pr && pr.fiber) || '',
+      skeinWeightGrams: it.specs.grams || (pr && pr.skeinWeightGrams) || null,
+      skeinYardage: it.specs.yards || (pr && pr.skeinYardage) || null,
+      colorHex: guessColorHex(it.colorway),
+      score, include: score >= 4 || (it.knownBrand && score >= 3)
+    };
+  }).filter(it=>it.score>=2 && (it.line || it.brand));
+  // Store and order date.
+  let store = opts.from ? opts.from.replace(/<[^>]*>/,'').replace(/"/g,'').trim() : '';
+  if(!store){ const m = (text||'').match(/thank you for (?:your order|shopping|ordering)(?: with| from| at)\s+([A-Z][\w&' .-]{1,40}?)[!.,\n]/i); if(m) store = m[1].trim(); }
+  let date = null;
+  const dm = opts.date || ((text||'').match(/\b(?:order(?:ed)?|purchase|placed)(?: date| on)?\s*:?\s*([A-Z][a-z]{2,8}\.? \d{1,2},? \d{4}|\d{1,2} [A-Z][a-z]{2,8} \d{4}|\d{4}-\d{2}-\d{2}|\d{1,2}\/\d{1,2}\/\d{2,4})/i)||[])[1];
+  if(dm){ const d = new Date(dm); if(!isNaN(d)) date = d.toISOString().slice(0,10); }
+  return { store, date, items: out };
+}
+
+/* ---- Reading files ---- */
+let _pdfjsLoading = null;
+function ensurePdfjsLoaded(){
+  if(typeof pdfjsLib !== 'undefined') return Promise.resolve();
+  if(_pdfjsLoading) return _pdfjsLoading;
+  _pdfjsLoading = new Promise((resolve, reject)=>{
+    const s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+    s.onload = () => { pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'; resolve(); };
+    s.onerror = () => { _pdfjsLoading = null; reject(new Error('load failed')); };
+    document.head.appendChild(s);
+  });
+  return _pdfjsLoading;
+}
+async function pdfToText(file, setStatus){
+  await ensurePdfjsLoaded();
+  const pdf = await pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise;
+  const pages = Math.min(pdf.numPages, 10);
+  let text = '';
+  for(let n=1; n<=pages; n++){
+    const page = await pdf.getPage(n);
+    const content = await page.getTextContent();
+    // Rebuild lines from positioned text runs; wide gaps become " | ".
+    const rows = new Map();
+    content.items.forEach(it=>{
+      const y = Math.round(it.transform[5]);
+      const key = [...rows.keys()].find(k=>Math.abs(k-y)<=2) ?? y;
+      if(!rows.has(key)) rows.set(key, []);
+      rows.get(key).push({ x: it.transform[4], w: it.width||0, s: it.str });
+    });
+    [...rows.entries()].sort((a,b)=>b[0]-a[0]).forEach(([,runs])=>{
+      runs.sort((a,b)=>a.x-b.x);
+      let line = '', end = null;
+      runs.forEach(r=>{ if(end!=null) line += (r.x - end > 25) ? ' | ' : (r.x - end > 1 ? ' ' : ''); line += r.s; end = r.x + r.w; });
+      text += line + '\n';
+    });
+  }
+  if(text.replace(/[\s|]/g,'').length >= 30) return text;
+  // Scanned PDF (no text layer): render pages and read them like a photo.
+  let ocr = '';
+  for(let n=1; n<=Math.min(pdf.numPages, 3); n++){
+    if(setStatus) setStatus(`Reading scanned page ${n}…`);
+    const page = await pdf.getPage(n);
+    const viewport = page.getViewport({ scale: 2 });
+    const canvas = document.createElement('canvas');
+    canvas.width = viewport.width; canvas.height = viewport.height;
+    await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+    const blob = await new Promise(r=>canvas.toBlob(r, 'image/png'));
+    ocr += await imageToText(blob, setStatus) + '\n';
+  }
+  return ocr;
+}
+async function imageToText(blob, setStatus){
+  await ensureTesseractLoaded();
+  const { data } = await Tesseract.recognize(blob, 'eng', {
+    logger: m => { if(setStatus && m.status==='recognizing text') setStatus(`Reading… ${Math.round(m.progress*100)}%`); }
+  });
+  return data.text || '';
+}
+
+/* ---- UI ---- */
+function openOrderImport(){
+  if(!STATE.online){ wgToast("You're offline — view-only until you reconnect.", "error"); return; }
+  cleanupOpenForms();
+  STATE.tab = 'stash';
+  STATE.orderImport = { items: null, store:'', date:'' };
+  render();
+}
+function closeOrderImport(){ STATE.orderImport = null; renderTab(); }
+function setImportStatus(t){ const el = document.getElementById('imp-status'); if(el) el.textContent = t || ''; }
+async function readOrderFromInputs(fileList){
+  const file = fileList && fileList[0];
+  let text = '', from = '', date = null;
+  try{
+    if(file){
+      const name = (file.name||'').toLowerCase();
+      if(/\.eml$/.test(name) || /message\/rfc822/.test(file.type||'')){
+        setImportStatus('Reading email…');
+        const e = parseEml(await file.text()); text = e.text; from = e.from; date = e.date;
+      } else if(/\.pdf$/.test(name) || /pdf/.test(file.type||'')){
+        setImportStatus('Loading PDF reader…');
+        text = await pdfToText(file, setImportStatus);
+      } else if(isAcceptableImageFile(file)){
+        setImportStatus('Loading text reader…');
+        text = await imageToText(await toRenderableImageBlob(file), setImportStatus);
+      } else if(/\.(txt|html?)$/.test(name) || /^text\//.test(file.type||'')){
+        const raw = await file.text();
+        text = /\.html?$/.test(name) || /html/.test(file.type||'') ? htmlToText(raw) : raw;
+      } else { wgToast('Use a .eml, PDF, image or text file.', 'error'); return; }
+    } else {
+      text = (document.getElementById('imp-text')||{}).value || '';
+      // A pasted raw email source (headers + MIME) gets decoded too.
+      if(/^(received|from|return-path|delivered-to|mime-version):/im.test(text) && /content-type:/i.test(text)){
+        const e = parseEml(text); text = e.text; from = e.from; date = e.date;
+      }
+    }
+  }catch(err){
+    console.error('Order import read failed', err);
+    setImportStatus('');
+    wgToast("Couldn't read that file — try pasting the email text instead.", 'error');
+    return;
+  }
+  setImportStatus('');
+  if(!text.trim()){ wgToast('Paste an order email or choose a file first.', 'error'); return; }
+  const res = parseOrderText(text, { from, date });
+  STATE.orderImport = { items: res.items.map(it=>({ ...it, id: uid(), colorHex: it.colorHex || '#B8B0BF', colorGuessed: !!it.colorHex })), store: res.store, date: res.date || todayStr() };
+  renderTab();
+  if(!res.items.length) wgToast("Didn't find any yarn in that order — you can add items by hand below.", 'error');
+}
+function importExistingMatch(it){
+  const k = s => (s||'').toLowerCase().trim();
+  return STATE.yarns.find(y=>k(y.brand)===k(it.brand) && k(y.line)===k(it.line) && k(y.colorway)===k(it.colorway) && k(it.colorway)) || null;
+}
+function updateImportItem(id, field, val){
+  const imp = STATE.orderImport; if(!imp || !imp.items) return;
+  imp.items = imp.items.map(it => it.id===id ? { ...it, [field]: val } : it);
+  if(field==='colorway' || field==='brand' || field==='line') renderTab();
+}
+function addImportRow(){
+  const imp = STATE.orderImport; if(!imp) return;
+  imp.items = [...(imp.items||[]), { id: uid(), brand:'', line:'', colorway:'', dyeLot:'', quantity:1, cost:null, weightCategory:'', fiber:'', skeinWeightGrams:null, skeinYardage:null, colorHex:'#B8B0BF', include:true }];
+  renderTab();
+}
+function renderImportItem(it){
+  const match = importExistingMatch(it);
+  const f = (field, attrs='') => `oninput="updateImportItem('${it.id}','${field}', this.value)" ${attrs}`;
+  return `<div class="card import-item ${it.include?'':'import-item-off'}">
+    <label class="row" style="gap:8px;">
+      <input type="checkbox" ${it.include?'checked':''} onchange="updateImportItem('${it.id}','include', this.checked); this.closest('.import-item').classList.toggle('import-item-off', !this.checked);" style="width:auto;" />
+      <input type="color" value="${esc(it.colorHex)}" ${f('colorHex')} title="${it.colorGuessed?'Color guessed from the colorway name — adjust if needed':'Pick the yarn color'}" aria-label="Yarn color" />
+      <strong class="grow" style="font-size:0.85rem;">${esc([it.brand, it.line].filter(Boolean).join(' ') || 'New item')}${it.colorway?` · ${esc(it.colorway)}`:''}</strong>
+    </label>
+    ${match ? `<p class="note ok-text" style="margin:6px 0 0;">Already in your stash — will add ${esc(it.quantity)} skein(s) to it.</p>` : ''}
+    <div class="import-grid">
+      <label class="field">Brand<input value="${esc(it.brand)}" onchange="updateImportItem('${it.id}','brand', this.value)" /></label>
+      <label class="field">Line<input value="${esc(it.line)}" onchange="updateImportItem('${it.id}','line', this.value)" /></label>
+      <label class="field">Colorway<input value="${esc(it.colorway)}" onchange="updateImportItem('${it.id}','colorway', this.value)" /></label>
+      <label class="field">Skeins<input type="number" min="1" step="1" value="${esc(it.quantity)}" ${f('quantity')} /></label>
+      <label class="field">Weight<select onchange="updateImportItem('${it.id}','weightCategory', this.value)"><option value="">—</option>${WEIGHTS.map(w=>`<option ${it.weightCategory===w?'selected':''}>${w}</option>`).join('')}</select></label>
+      <label class="field">g / skein<input type="number" min="0" value="${esc(it.skeinWeightGrams??'')}" ${f('skeinWeightGrams')} /></label>
+      <label class="field">${unitLabel()} / skein<input type="number" min="0" value="${it.skeinYardage ? toDisplayLength(it.skeinYardage) : ''}" oninput="updateImportItem('${it.id}','skeinYardage', fromInputLength(this.value))" /></label>
+      <label class="field">Cost / skein<input type="number" min="0" step="0.01" value="${esc(it.cost??'')}" ${f('cost')} /></label>
+    </div>
+  </div>`;
+}
+function renderOrderImport(){
+  const imp = STATE.orderImport;
+  if(!imp) return '';
+  if(!imp.items){
+    return `<div class="card mb-4 order-import">
+      <div class="row-between"><p class="no-margin" style="font-family:'Fraunces',serif; font-weight:600;">Import from an order email</p>
+        <button class="del-btn" onclick="closeOrderImport()" aria-label="Close">✕</button></div>
+      <p class="note" style="margin:6px 0 10px;">Paste your order confirmation, or choose a saved email (.eml), PDF receipt or screenshot. It's read on this device — nothing is uploaded — and you'll review everything before it's added.</p>
+      <textarea id="imp-text" rows="6" class="full-width" placeholder="Paste the order email here…"></textarea>
+      <div class="row mt-2">
+        <button class="btn btn-primary btn-small" onclick="readOrderFromInputs(null)">Find yarn</button>
+        <label class="btn btn-ghost btn-small" style="cursor:pointer;">${ICONS.upload} Choose file
+          <input type="file" accept=".eml,message/rfc822,.pdf,application/pdf,image/*,.heic,.heif,.txt,.html,text/plain,text/html" style="display:none;" onchange="readOrderFromInputs(this.files); this.value='';" />
+        </label>
+        <span id="imp-status" class="note"></span>
+      </div>
+    </div>`;
+  }
+  const n = imp.items.filter(i=>i.include).length;
+  return `<div class="card mb-4 order-import">
+    <div class="row-between"><p class="no-margin" style="font-family:'Fraunces',serif; font-weight:600;">Review your order</p>
+      <button class="del-btn" onclick="closeOrderImport()" aria-label="Close">✕</button></div>
+    <p class="note" style="margin:6px 0 10px;">Found ${imp.items.length} item${imp.items.length===1?'':'s'}. Check the details — colors are a guess from the colorway name. Unticked items are skipped.</p>
+    <div class="row mb-3">
+      <label class="field" style="flex:1; min-width:140px;">Store<input value="${esc(imp.store)}" oninput="STATE.orderImport.store=this.value" /></label>
+      <label class="field">Purchase date<input type="date" value="${esc(imp.date)}" oninput="STATE.orderImport.date=this.value" /></label>
+    </div>
+    <div class="stack-gap">${imp.items.map(renderImportItem).join('')}</div>
+    <div class="row mt-3">
+      <button class="btn btn-ghost btn-small" onclick="addImportRow()">${ICONS.plus} Add item</button>
+      <button class="btn btn-ghost btn-small" onclick="STATE.orderImport.items=null; renderTab();">Start over</button>
+      <span class="grow"></span>
+      <button class="btn btn-primary" onclick="commitOrderImport()">Add ${n} to stash</button>
+    </div>
+  </div>`;
+}
+function commitOrderImport(){
+  const imp = STATE.orderImport;
+  if(!imp || !imp.items) return;
+  const chosen = imp.items.filter(i=>i.include && (i.line||'').trim());
+  if(!chosen.length){ wgToast('Tick at least one item with a line name.', 'error'); return; }
+  const noWeight = chosen.find(i=>!i.weightCategory);
+  if(noWeight){ wgToast(`Pick a yarn weight for ${[noWeight.brand, noWeight.line].filter(Boolean).join(' ')}.`, 'error'); return; }
+  const now = new Date().toISOString();
+  let added = 0, merged = 0;
+  chosen.forEach(it=>{
+    const qty = Math.max(1, Math.round(Number(it.quantity)||1));
+    const skeinYd = Math.round(Number(it.skeinYardage)||0);
+    const match = importExistingMatch(it);
+    if(match){
+      STATE.yarns = STATE.yarns.map(y => y.id===match.id ? { ...y, quantity:(Number(y.quantity)||0)+qty, yardageRemaining:(Number(y.yardageRemaining)||0) + qty*(Number(y.skeinYardage)||skeinYd), updatedAt:now } : y);
+      merged++; return;
+    }
+    const brand = (it.brand||'').trim(), line = (it.line||'').trim();
+    const yarn = {
+      id: uid(), name: [brand, line].filter(Boolean).join(' '), brand, line,
+      colorway: (it.colorway||'').trim(), colorwayNumber:'', dyeLot: (it.dyeLot||'').trim(),
+      fiber: it.fiber || '', weightCategory: it.weightCategory,
+      skeinWeightGrams: Number(it.skeinWeightGrams)||0, skeinYardage: skeinYd, quantity: qty,
+      cost: it.cost===''||it.cost==null ? null : Number(it.cost),
+      purchaseDate: imp.date || null, purchasedFrom: (imp.store||'').trim() || null,
+      isMulticolor:false, colors:[], primaryIndex:0, matchMode:'simple', colorHex: it.colorHex || '#B8B0BF',
+      scraps: [], status:'available', allocatedTo:null, dateAdded: todayStr(), updatedAt: now
+    };
+    yarn.yardageRemaining = qty * skeinYd;
+    STATE.yarns.push(yarn);
+    added++;
+  });
+  persist();
+  STATE.orderImport = null;
+  renderTab();
+  scrollToTop();
+  wgToast([added ? `Added ${added} yarn${added===1?'':'s'}` : '', merged ? `topped up ${merged}` : ''].filter(Boolean).join(', ') + '.', 'success');
 }
 
 /* =================================================================
