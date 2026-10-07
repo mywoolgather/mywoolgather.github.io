@@ -132,11 +132,14 @@ let STATE = {
   stashFilterFiber: 'All fibers',
   stashFilterScrap: 'all',
   gauge: {            // standalone gauge calculator inputs (session-held)
-    craft:'knit', stitchType:'', needleSize:'',
-    measUnit:'in', measSize:4,
-    sts:'', rows:'',
-    targetSts:'', targetRows:'',
-    castonWidth:''   // desired finished width for the cast-on calculator
+    craft:'knit', terms:'us', stitchType:'', needleSize:'',
+    measUnit:'in',
+    sts:'', swW:4,          // stitches counted across a measured width
+    rows:'', swH:4,         // rows counted down a measured height
+    targetSts:'', targetRows:'', patSts:'', patRows:'',   // pattern gauge + counts to convert
+    sizeW:'', sizeL:'', multiple:'', multPlus:'',         // size → stitches/rows
+    shapeSts:'', shapeN:'', shapeKind:'inc',              // even increases/decreases
+    open:{ size:true }
   },
   stashSort: 'recent',
   projFilterStatus: 'All statuses',
@@ -2707,7 +2710,9 @@ function handleSaveProject(e){
       const s = document.getElementById('pf-gauge-sts').value;
       const r = document.getElementById('pf-gauge-rows').value;
       if(s==='' && r==='') return null;
-      return { sts: s===''?null:Number(s), rows: r===''?null:Number(r), unit: document.getElementById('pf-gauge-unit').value };
+      // Keep details saved from the gauge calculator (craft, stitch type, terms).
+      const prev = (existing && existing.gauge) || {};
+      return { ...prev, sts: s===''?null:Number(s), rows: r===''?null:Number(r), unit: document.getElementById('pf-gauge-unit').value };
     })(),
     status: document.getElementById('pf-status').value,
     startDate: document.getElementById('pf-startdate').value || todayStr(),
@@ -2810,7 +2815,7 @@ function renderProjectRow(p){
         ${usedYarns.map(y=>`<span class="dot" style="background:${y.colorHex}" title="${esc(y.name)}"></span>`).join('')}
         ${garmentBadge ? `<span class="note">${esc(garmentBadge)}</span>` : ''}
         ${p.needleSize ? `<span class="note">🪡 ${esc(p.needleSize)}</span>` : ''}
-        ${p.gauge && (p.gauge.sts||p.gauge.rows) ? `<span class="note">📐 ${p.gauge.sts||'?'}×${p.gauge.rows||'?'}/${p.gauge.unit==='cm'?'10cm':'4in'}</span>` : ''}
+        ${p.gauge && (p.gauge.sts||p.gauge.rows) ? `<span class="note">📐 ${p.gauge.sts||'?'}×${p.gauge.rows||'?'}/${p.gauge.unit==='cm'?'10cm':'4in'}${p.gauge.stitchType?` ${esc(p.gauge.stitchType)}${p.gauge.terms==='uk'?' (UK)':''}`:''}</span>` : ''}
         ${attachedPalette ? `<span class="note">${ICONS.palette} ${esc(attachedPalette.name)}</span>` : ''}
         ${gapBadge}
         ${counters.length ? `<span class="note">${counters.length} counter${counters.length===1?'':'s'}</span>` : ''}
@@ -3511,134 +3516,336 @@ function renderShoppingForm(){
 }
 
 /* =================================================================
-   Gauge calculator (standalone). Enter a swatch — stitches & rows over a
-   measurement (in or cm), plus the conditions (knit/crochet, stitch type,
-   hook/needle). Computes stitches-per-unit and rows-per-unit. If a target
-   gauge is entered (from the pattern), compares and reports how far off you
-   are and which direction to adjust the hook/needle.
+   Gauge calculator (standalone). Enter a swatch — stitches counted across a
+   measured width and rows counted down a measured height (in or cm) — plus
+   the conditions (knit/crochet, stitch type, hook/needle). Everything else
+   is the same simple proportion:
+       stitches needed = target width  × swatch stitches ÷ swatch width
+       rows needed     = target length × swatch rows     ÷ swatch height
+   Sections: your gauge; compare to the pattern (stitches AND rows) and
+   convert the pattern's counts to yours; size → stitches/rows (rounded to
+   a stitch multiple); and spacing increases/decreases evenly. Counts are
+   true stitches only — no turning-chain/foundation extras are added, since
+   patterns handle those differently (e.g. stacked single crochets).
 ================================================================= */
+
+/* ---- Pure math (covered by tests.html) ---- */
+// Stitches/rows per one unit of measure, or null if not enough input.
+function gaugeRate(count, span){
+  count = Number(count); span = Number(span);
+  return count>0 && span>0 ? count/span : null;
+}
+// The core proportion: how many stitches (or rows) for a target size.
+function countForSize(size, count, span){
+  const rate = gaugeRate(count, span);
+  size = Number(size);
+  return rate && size>0 ? Math.round(size*rate) : null;
+}
+// Valid counts for a stitch pattern "multiple of `mult` + `plus`" nearest to
+// n: the closest at-or-below and at-or-above. Equal when n is already valid.
+function nearestMultiples(n, mult, plus){
+  n = Number(n); mult = Math.floor(Number(mult)); plus = Math.floor(Number(plus)||0);
+  if(!(n>0) || !(mult>=1)) return null;
+  if(n <= plus) return { below:null, above:plus>0?plus:mult };
+  const k = Math.floor((n - plus) / mult);
+  const below = plus + k*mult;
+  const above = below===n ? n : below + mult;
+  return { below: below>0 ? below : null, above };
+}
+// A pattern count at the pattern's gauge → the count at your gauge.
+function translateCount(count, yourRate, patternRate){
+  count = Number(count); yourRate = Number(yourRate); patternRate = Number(patternRate);
+  return count>0 && yourRate>0 && patternRate>0 ? Math.round(count*yourRate/patternRate) : null;
+}
+// Spread `changes` increases or decreases as evenly as possible across a row
+// of `sts` stitches. Returns groups of { size, times } — `size` is how many
+// existing stitches each repeat consumes — or { error }.
+function spreadShaping(sts, changes, kind){
+  sts = Math.floor(Number(sts)); changes = Math.floor(Number(changes));
+  if(!(sts>0) || !(changes>0)) return null;
+  const minSize = kind==='dec' ? 2 : 1;
+  if(sts < changes*minSize){
+    return { error: kind==='dec'
+      ? `Too many decreases — each one uses 2 stitches, so ${sts} stitches allow at most ${Math.floor(sts/2)}.`
+      : `Too many increases — at most one per stitch (${sts}).` };
+  }
+  const q = Math.floor(sts/changes), r = sts % changes;
+  const groups = [];
+  if(r) groups.push({ size:q+1, times:r });
+  groups.push({ size:q, times:changes-r });
+  return { groups, result: kind==='dec' ? sts-changes : sts+changes };
+}
+
+/* US ↔ UK crochet names (UK names are one step "taller"). Used only to show
+   a hint next to the free-text stitch type when it's a recognized
+   abbreviation. */
+const CROCHET_US_TO_UK = { sc:'dc', hdc:'htr', dc:'tr', tr:'dtr', dtr:'trtr' };
+const CROCHET_NAMES = { sc:'single crochet', hdc:'half double crochet', dc:'double crochet', tr:'treble', dtr:'double treble', htr:'half treble', trtr:'triple treble' };
+function crochetTermHint(stitch, terms){
+  const key = (stitch||'').trim().toLowerCase();
+  if(!key) return '';
+  const map = terms==='uk'
+    ? Object.fromEntries(Object.entries(CROCHET_US_TO_UK).map(([us,uk])=>[uk,us]))
+    : CROCHET_US_TO_UK;
+  const other = map[key];
+  if(!other) return '';
+  return terms==='uk'
+    ? `UK ${key} = US ${other} (${CROCHET_NAMES[other]})`
+    : `US ${key} = UK ${other}`;
+}
+// Wording for one shaping repeat, e.g. "K5, M1" or "4 sc, 2 sc in next".
+function shapingRepeatText(size, kind, craft, stitchWord){
+  if(craft==='crochet'){
+    const st = stitchWord || 'st';
+    if(kind==='dec') return size>2 ? `${size-2} ${st}, ${st}2tog` : `${st}2tog`;
+    return size>1 ? `${size-1} ${st}, 2 ${st} in next` : `2 ${st} in next`;
+  }
+  if(kind==='dec') return size>2 ? `K${size-2}, k2tog` : 'k2tog';
+  return `K${size}, M1`;
+}
+
+/* ---- UI ---- */
+function gaugeRefSpan(){ return STATE.gauge.measUnit==='cm' ? 10 : 4; }
+function gaugeUnit(){ return STATE.gauge.measUnit==='cm' ? 'cm' : 'in'; }
+function round1(n){ return Math.round(n*10)/10; }
+// Typing only refreshes the result panels (keeps focus); fields that change
+// labels (craft, unit, terms) re-render the whole tab.
 function gaugeUpdate(field, val){
   STATE.gauge[field] = val;
-  // Only the result area needs refreshing; re-render the whole tab is simplest
-  // and keeps inputs in sync, but that blurs fields. Instead update the result
-  // panel in place so typing stays smooth.
-  const el = document.getElementById('gauge-result');
-  if(el) el.innerHTML = buildGaugeResultHTML();
+  if(['craft','measUnit','terms'].includes(field)){ renderTab(); return; }
+  refreshGaugeOutputs();
 }
-function buildGaugeResultHTML(){
+function gaugeToggle(key, open){ STATE.gauge.open = { ...(STATE.gauge.open||{}), [key]: open }; }
+const GAUGE_OUTPUTS = {
+  'g-out-gauge': ()=>buildYourGaugeHTML(),
+  'g-out-compare': ()=>buildGaugeCompareHTML(),
+  'g-out-size': ()=>buildGaugeSizeHTML(),
+  'g-out-shape': ()=>buildGaugeShapeHTML(),
+  'g-out-hint': ()=>buildTermHintHTML()
+};
+function refreshGaugeOutputs(){
+  Object.entries(GAUGE_OUTPUTS).forEach(([id, fn])=>{
+    const el = document.getElementById(id);
+    if(el) el.innerHTML = fn();
+  });
+}
+function gaugeRates(){
   const g = STATE.gauge;
-  const meas = Number(g.measSize)||0;
-  const sts = Number(g.sts)||0;
-  const rows = Number(g.rows)||0;
-  const unit = g.measUnit==='cm' ? 'cm' : 'in';
-  if(!meas || !sts){
-    return `<p class="note">Enter your swatch measurement and stitch count to see your gauge.</p>`;
-  }
-  const stsPer = sts/meas;
-  const rowsPer = rows>0 ? rows/meas : null;
-  // Standard reference is per 4 in / per 10 cm.
-  const refSpan = unit==='cm' ? 10 : 4;
-  const stsPerRef = Math.round(stsPer*refSpan*10)/10;
-  const rowsPerRef = rowsPer!=null ? Math.round(rowsPer*refSpan*10)/10 : null;
-
-  let out = `<div class="card" style="margin-top:4px;">
-    <p style="margin:0 0 6px; font-weight:600; font-family:'Fraunces',serif;">Your gauge</p>
-    <p style="margin:0; font-size:0.9rem;">${Math.round(stsPer*10)/10} sts / ${unit} · <strong>${stsPerRef} sts per ${refSpan} ${unit}</strong></p>
-    ${rowsPerRef!=null ? `<p style="margin:2px 0 0; font-size:0.9rem;">${Math.round(rowsPer*10)/10} rows / ${unit} · <strong>${rowsPerRef} rows per ${refSpan} ${unit}</strong></p>` : ''}
+  return { sts: gaugeRate(g.sts, g.swW), rows: gaugeRate(g.rows, g.swH) };
+}
+function buildTermHintHTML(){
+  const g = STATE.gauge;
+  if(g.craft!=='crochet') return '';
+  const hint = crochetTermHint(g.stitchType, g.terms);
+  return hint ? `<span class="note">${esc(hint)}</span>` : '';
+}
+function buildYourGaugeHTML(){
+  const { sts, rows } = gaugeRates();
+  const unit = gaugeUnit(), ref = gaugeRefSpan();
+  if(!sts && !rows) return `<p class="note">Enter stitches and the width they cover (and rows and the height they cover) to see your gauge.</p>`;
+  return `<div class="gauge-result-card">
+    ${sts ? `<p class="no-margin">${round1(sts)} sts / ${unit} · <strong>${round1(sts*ref)} sts per ${ref} ${unit}</strong></p>` : ''}
+    ${rows ? `<p class="no-margin">${round1(rows)} rows / ${unit} · <strong>${round1(rows*ref)} rows per ${ref} ${unit}</strong></p>` : ''}
   </div>`;
-
-  // Target comparison
-  const tSts = Number(g.targetSts)||0;
-  if(tSts>0){
-    // Target is expressed per the same reference span the user is working in.
-    const diffPct = ((stsPerRef - tSts) / tSts) * 100;
-    const absPct = Math.abs(Math.round(diffPct));
-    let verdict, advice, cls;
-    if(absPct <= 3){
-      verdict = 'On gauge ✓'; cls='ok-text';
-      advice = 'Your stitch gauge matches the target closely — you\'re good to go.';
-    } else if(diffPct > 0){
-      // more stitches per span than target = your stitches are smaller = tighter
-      verdict = `Running tight — ${absPct}% too many stitches`; cls='danger-text';
-      advice = 'Your stitches are smaller than the pattern\'s, so your piece will come out too small. Try going up a hook/needle size and re-swatching.';
-    } else {
-      verdict = `Running loose — ${absPct}% too few stitches`; cls='danger-text';
-      advice = 'Your stitches are larger than the pattern\'s, so your piece will come out too big. Try going down a hook/needle size and re-swatching.';
+}
+function gaugeVerdictHTML(kindLabel, mine, target, ref, unit){
+  const diffPct = ((mine - target) / target) * 100;
+  const absPct = Math.abs(Math.round(diffPct));
+  const dim = kindLabel==='stitches' ? 'wider' : 'longer';
+  const dimSmall = kindLabel==='stitches' ? 'narrower' : 'shorter';
+  let verdict, cls, advice;
+  if(absPct <= 3){ verdict = `${kindLabel[0].toUpperCase()+kindLabel.slice(1)}: on gauge ✓`; cls='ok-text'; advice=''; }
+  else if(diffPct > 0){
+    verdict = `${kindLabel[0].toUpperCase()+kindLabel.slice(1)}: ${absPct}% too many (tight)`; cls='danger-text';
+    advice = `Following the pattern as written comes out about ${absPct}% ${dimSmall}. Try a larger hook/needle, or use the converted counts below.`;
+  } else {
+    verdict = `${kindLabel[0].toUpperCase()+kindLabel.slice(1)}: ${absPct}% too few (loose)`; cls='danger-text';
+    advice = `Following the pattern as written comes out about ${absPct}% ${dim}. Try a smaller hook/needle, or use the converted counts below.`;
+  }
+  return `<p class="no-margin ${cls}" style="font-weight:600;">${esc(verdict)}</p>
+    <p class="note no-margin">Pattern: ${target} per ${ref} ${unit} · You: ${round1(mine)}</p>
+    ${advice ? `<p class="no-margin" style="font-size:0.85rem;">${advice}</p>` : ''}`;
+}
+function buildGaugeCompareHTML(){
+  const g = STATE.gauge, unit = gaugeUnit(), ref = gaugeRefSpan();
+  const { sts, rows } = gaugeRates();
+  const tSts = Number(g.targetSts)||0, tRows = Number(g.targetRows)||0;
+  if(!tSts && !tRows) return `<p class="note">Enter the pattern's gauge to compare.</p>`;
+  const parts = [];
+  if(tSts && sts) parts.push(gaugeVerdictHTML('stitches', sts*ref, tSts, ref, unit));
+  if(tRows && rows) parts.push(gaugeVerdictHTML('rows', rows*ref, tRows, ref, unit));
+  // Pattern count → your count, at each gauge.
+  const ps = translateCount(g.patSts, sts, tSts/ref);
+  const pr = translateCount(g.patRows, rows, tRows/ref);
+  if(ps!=null) parts.push(`<p class="no-margin">Pattern's <strong>${Number(g.patSts)} sts</strong> → <strong>${ps} sts</strong> at your gauge</p>`);
+  if(pr!=null) parts.push(`<p class="no-margin">Pattern's <strong>${Number(g.patRows)} rows</strong> → <strong>${pr} rows</strong> at your gauge</p>`);
+  if(!parts.length) return `<p class="note">Enter your swatch above to compare.</p>`;
+  return `<div class="gauge-result-card stack-gap">${parts.join('')}</div>`;
+}
+function buildGaugeSizeHTML(){
+  const g = STATE.gauge, unit = gaugeUnit();
+  const { sts, rows } = gaugeRates();
+  const out = [];
+  const nSts = countForSize(g.sizeW, g.sts, g.swW);
+  const nRows = countForSize(g.sizeL, g.rows, g.swH);
+  if(nSts!=null){
+    out.push(`<p class="no-margin">For <strong>${Number(g.sizeW)} ${unit}</strong> wide: <strong>${nSts} stitches</strong></p>`);
+    const m = Number(g.multiple)>=1 ? nearestMultiples(nSts, g.multiple, g.multPlus) : null;
+    if(m && !(m.below===nSts && m.above===nSts)){
+      const opt = n => `<strong>${n} sts</strong> (${round1(n/sts)} ${unit})`;
+      const opts = [m.below, m.above].filter(n=>n!=null && n>0);
+      out.push(`<p class="no-margin" style="font-size:0.85rem;">To fit a multiple of ${Math.floor(g.multiple)}${Number(g.multPlus)?` + ${Math.floor(g.multPlus)}`:''}: ${opts.map(opt).join(' or ')}</p>`);
+    } else if(m){
+      out.push(`<p class="note no-margin">Already fits the multiple of ${Math.floor(g.multiple)}${Number(g.multPlus)?` + ${Math.floor(g.multPlus)}`:''} ✓</p>`);
     }
-    out += `<div class="card" style="margin-top:10px;">
-      <p style="margin:0 0 4px; font-weight:600;" class="${cls}">${esc(verdict)}</p>
-      <p class="note" style="margin:0;">Target: ${tSts} sts per ${refSpan} ${unit} · You: ${stsPerRef}</p>
-      <p style="margin:6px 0 0; font-size:0.85rem;">${advice}</p>
-    </div>`;
   }
-
-  // Cast-on calculator: desired finished width -> stitches to cast on, at
-  // this gauge. Uses stitches-per-unit directly, so it's exact for the unit
-  // the swatch was measured in.
-  const width = Number(g.castonWidth)||0;
-  if(width>0){
-    const castOn = Math.round(stsPer * width);
-    out += `<div class="card" style="margin-top:10px;">
-      <p style="margin:0 0 4px; font-weight:600; font-family:'Fraunces',serif;">Cast on</p>
-      <p style="margin:0; font-size:0.95rem;">For a <strong>${width} ${unit}</strong> width at your gauge, cast on about <strong>${castOn} stitches</strong>.</p>
-      <p class="note" style="margin:6px 0 0;">Rounded to the nearest stitch. Add any edge/selvedge or pattern-repeat stitches your pattern calls for.</p>
-    </div>`;
+  if(nRows!=null) out.push(`<p class="no-margin">For <strong>${Number(g.sizeL)} ${unit}</strong> long: <strong>${nRows} rows</strong></p>`);
+  if(!out.length){
+    return `<p class="note">${(g.sizeW||g.sizeL) && !(sts||rows) ? 'Enter your swatch above first.' : 'Enter a width and/or length.'}</p>`;
   }
-  return out;
+  return `<div class="gauge-result-card stack-gap">${out.join('')}
+    <p class="note no-margin">A starting point, not always the final number — adjust for the stitch-pattern multiple, any increases/decreases, and whether the piece is built in stitches or rows.</p>
+  </div>`;
+}
+function buildGaugeShapeHTML(){
+  const g = STATE.gauge;
+  const kind = g.shapeKind==='dec' ? 'dec' : 'inc';
+  const res = spreadShaping(g.shapeSts, g.shapeN, kind);
+  if(!res) return `<p class="note">Enter your current stitch count and how many to ${kind==='dec'?'decrease':'increase'}.</p>`;
+  if(res.error) return `<p class="danger-text no-margin">${esc(res.error)}</p>`;
+  // Short abbreviations from the stitch-type box (sc, hdc…) read naturally in
+  // crochet instructions; anything longer falls back to "st".
+  const word = (g.stitchType||'').trim();
+  const stitchWord = g.craft==='crochet' && /^[a-z]{1,4}$/i.test(word) ? word.toLowerCase() : null;
+  const steps = res.groups.map(gr => `[${shapingRepeatText(gr.size, kind, g.craft, stitchWord)}] ${gr.times} time${gr.times===1?'':'s'}`);
+  return `<div class="gauge-result-card stack-gap">
+    <p class="no-margin">Work ${steps.join(', then ')}.</p>
+    <p class="no-margin"><strong>${Number(g.shapeSts)} → ${res.result} sts</strong></p>
+    ${res.groups.length>1 ? `<p class="note no-margin">For the most even spread, alternate the two repeats instead of working them in blocks.</p>` : ''}
+  </div>`;
+}
+function saveGaugeToProject(){
+  const sel = document.getElementById('g-save-project');
+  const id = sel && sel.value;
+  if(!id){ wgToast('Pick a project first.', 'error'); return; }
+  const g = STATE.gauge, ref = gaugeRefSpan();
+  const { sts, rows } = gaugeRates();
+  if(!sts && !rows){ wgToast('Enter your swatch first.', 'error'); return; }
+  const gauge = {
+    sts: sts ? round1(sts*ref) : null,
+    rows: rows ? round1(rows*ref) : null,
+    unit: gaugeUnit(),
+    craft: g.craft,
+    stitchType: (g.stitchType||'').trim() || null,
+    terms: g.craft==='crochet' ? (g.terms||'us') : null
+  };
+  STATE.projects = STATE.projects.map(p => p.id===id ? {
+    ...p, gauge,
+    needleSize: p.needleSize || (g.needleSize||'').trim() || null,
+    updatedAt: new Date().toISOString()
+  } : p);
+  persist();
+  const proj = STATE.projects.find(p=>p.id===id);
+  wgToast(`Gauge saved to ${proj ? proj.name : 'project'}.`, 'success');
+}
+function gaugeNum(field, placeholder, extra=''){
+  return `<input type="number" min="0" step="any" inputmode="decimal" value="${esc(STATE.gauge[field]??'')}" placeholder="${placeholder}" oninput="gaugeUpdate('${field}', this.value)" ${extra} />`;
+}
+function gaugeSection(key, title, body){
+  const open = STATE.gauge.open && STATE.gauge.open[key];
+  return `<details class="card mb-4" ${open?'open':''} ontoggle="gaugeToggle('${key}', this.open)">
+    <summary class="gauge-summary">${title}</summary>
+    ${body}
+  </details>`;
 }
 function renderGauge(){
   const g = STATE.gauge;
-  const unit = g.measUnit==='cm' ? 'cm' : 'in';
-  const refSpan = unit==='cm' ? 10 : 4;
+  // First visit: measure in cm if the user works in meters.
+  if(!g._unitInit){ g._unitInit = true; if(STATE.unitPref==='m'){ g.measUnit='cm'; g.swW=10; g.swH=10; } }
+  const unit = gaugeUnit(), ref = gaugeRefSpan();
+  const crochet = g.craft==='crochet';
+  const projects = STATE.projects.filter(p=>p.status!=='Frogged');
   return `
-  <p class="note" style="margin:0 0 16px;">Knit or crochet a swatch, then enter what you measured. Gauge determines whether your finished piece comes out the right size.</p>
-  <div class="card form-grid" style="margin-bottom:16px;">
+  <p class="note" style="margin:0 0 16px;">${crochet?'Crochet':'Knit'} a swatch, then count stitches across and rows down, and measure each. Gauge decides whether your finished piece comes out the right size.</p>
+  <div class="card form-grid mb-4">
     <label class="field">Craft
       <select onchange="gaugeUpdate('craft', this.value)">
-        <option value="knit" ${g.craft==='knit'?'selected':''}>Knit</option>
-        <option value="crochet" ${g.craft==='crochet'?'selected':''}>Crochet</option>
+        <option value="knit" ${!crochet?'selected':''}>Knit</option>
+        <option value="crochet" ${crochet?'selected':''}>Crochet</option>
       </select>
     </label>
-    <label class="field">Stitch type (optional)
-      <input value="${esc(g.stitchType)}" placeholder="${g.craft==='crochet'?'e.g. single crochet':'e.g. stockinette'}" onchange="gaugeUpdate('stitchType', this.value)" />
-    </label>
-    <label class="field">Hook / needle size (optional)
-      <input value="${esc(g.needleSize)}" placeholder="e.g. 4.5 mm / US 7" onchange="gaugeUpdate('needleSize', this.value)" />
-    </label>
-    <label class="field">Measure over
-      <div style="display:flex; gap:6px; align-items:center;">
-        <input type="number" min="0" step="any" value="${esc(g.measSize)}" style="width:64px;" onchange="gaugeUpdate('measSize', this.value)" />
-        <select onchange="gaugeUpdate('measUnit', this.value)">
-          <option value="in" ${g.measUnit==='in'?'selected':''}>inches</option>
-          <option value="cm" ${g.measUnit==='cm'?'selected':''}>cm</option>
-        </select>
+    ${crochet ? `<div class="field gauge-field">Stitch terms
+      <div class="row">
+        <button type="button" class="harmony-btn ${g.terms!=='uk'?'active':''}" onclick="gaugeUpdate('terms','us')">US</button>
+        <button type="button" class="harmony-btn ${g.terms==='uk'?'active':''}" onclick="gaugeUpdate('terms','uk')">UK</button>
       </div>
+    </div>` : ''}
+    <label class="field">Stitch type (optional)
+      <input value="${esc(g.stitchType)}" placeholder="${crochet ? (g.terms==='uk'?'e.g. dc, htr, tr':'e.g. sc, hdc, dc') : 'e.g. stockinette, garter'}" oninput="gaugeUpdate('stitchType', this.value)" />
+      <span id="g-out-hint">${buildTermHintHTML()}</span>
     </label>
-    <label class="field">Stitches counted
-      <input type="number" min="0" step="any" value="${esc(g.sts)}" placeholder="18" onchange="gaugeUpdate('sts', this.value)" />
+    <label class="field">${crochet?'Hook':'Needle'} size (optional)
+      <input value="${esc(g.needleSize)}" placeholder="e.g. 4.5 mm${crochet?' / 7':' / US 7'}" oninput="gaugeUpdate('needleSize', this.value)" />
     </label>
-    <label class="field">Rows counted (optional)
-      <input type="number" min="0" step="any" value="${esc(g.rows)}" placeholder="24" onchange="gaugeUpdate('rows', this.value)" />
+    <label class="field">Measure in
+      <select onchange="gaugeUpdate('measUnit', this.value)">
+        <option value="in" ${unit==='in'?'selected':''}>inches</option>
+        <option value="cm" ${unit==='cm'?'selected':''}>cm</option>
+      </select>
     </label>
+    <div class="field gauge-field span2">Your swatch
+      <div class="gauge-swatch-grid">
+        <span>Stitches</span>${gaugeNum('sts', unit==='cm'?'14':'18', 'aria-label="Stitches counted"')}
+        <span>across</span>${gaugeNum('swW', ref, 'aria-label="Width measured"')}<span>${unit}</span>
+        <span>Rows</span>${gaugeNum('rows', unit==='cm'?'12':'24', 'aria-label="Rows counted"')}
+        <span>down</span>${gaugeNum('swH', ref, 'aria-label="Height measured"')}<span>${unit}</span>
+      </div>
+    </div>
+    <div class="span2" id="g-out-gauge">${buildYourGaugeHTML()}</div>
+    ${projects.length ? `<div class="span2 row">
+      <select id="g-save-project" aria-label="Project to save gauge to" class="grow" style="max-width:280px;">
+        <option value="">Save this gauge to a project…</option>
+        ${projects.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('')}
+      </select>
+      <button type="button" class="btn btn-ghost btn-small" onclick="saveGaugeToProject()">Save</button>
+    </div>` : ''}
   </div>
 
-  <details class="card" style="margin-bottom:16px;">
-    <summary style="cursor:pointer; font-weight:600; font-family:'Fraunces',serif;">Compare to a pattern's target gauge (optional)</summary>
-    <p class="note" style="margin:8px 0;">Enter the gauge your pattern calls for, per ${refSpan} ${unit}, to check if you're on gauge.</p>
-    <label class="field" style="max-width:220px;">Target stitches per ${refSpan} ${unit}
-      <input type="number" min="0" step="any" value="${esc(g.targetSts)}" placeholder="20" onchange="gaugeUpdate('targetSts', this.value)" />
-    </label>
-  </details>
+  ${gaugeSection('size', 'How many stitches &amp; rows for a size?', `
+    <p class="note" style="margin:8px 0;">Want a sleeve 25 ${unit} wide? Stitches = 25 × your stitches ÷ your swatch width. Same for rows and length.</p>
+    <div class="form-grid" style="margin-bottom:10px;">
+      <label class="field">Target width (${unit})${gaugeNum('sizeW', unit==='cm'?'25':'10')}</label>
+      <label class="field">Target length (${unit})${gaugeNum('sizeL', unit==='cm'?'30':'12')}</label>
+      <div class="field gauge-field span2">Stitch pattern multiple (optional)
+        <div class="row">multiple of ${gaugeNum('multiple','e.g. 6','style="width:80px;"')} + ${gaugeNum('multPlus','0','style="width:70px;"')}</div>
+      </div>
+    </div>
+    <div id="g-out-size">${buildGaugeSizeHTML()}</div>`)}
 
-  <details class="card" style="margin-bottom:16px;">
-    <summary style="cursor:pointer; font-weight:600; font-family:'Fraunces',serif;">Cast-on calculator (optional)</summary>
-    <p class="note" style="margin:8px 0;">Enter a finished width and we'll tell you how many stitches to cast on at your gauge.</p>
-    <label class="field" style="max-width:220px;">Desired finished width (${unit})
-      <input type="number" min="0" step="any" value="${esc(g.castonWidth)}" placeholder="${unit==='cm'?'50':'20'}" onchange="gaugeUpdate('castonWidth', this.value)" />
-    </label>
-  </details>
+  ${gaugeSection('compare', 'Compare to your pattern', `
+    <p class="note" style="margin:8px 0;">Enter the gauge your pattern calls for, per ${ref} ${unit}.</p>
+    <div class="form-grid" style="margin-bottom:10px;">
+      <label class="field">Pattern stitches per ${ref} ${unit}${gaugeNum('targetSts', unit==='cm'?'16':'20')}</label>
+      <label class="field">Pattern rows per ${ref} ${unit}${gaugeNum('targetRows', unit==='cm'?'14':'24')}</label>
+      <label class="field">Convert a pattern stitch count (optional)${gaugeNum('patSts','e.g. 80')}</label>
+      <label class="field">Convert a pattern row count (optional)${gaugeNum('patRows','e.g. 40')}</label>
+    </div>
+    <div id="g-out-compare">${buildGaugeCompareHTML()}</div>`)}
 
-  <div id="gauge-result">${buildGaugeResultHTML()}</div>
+  ${gaugeSection('shape', 'Spread increases or decreases evenly', `
+    <div class="form-grid" style="margin:8px 0 10px;">
+      <label class="field">Current stitches${gaugeNum('shapeSts','60')}</label>
+      <div class="field gauge-field">How many
+        <div class="row">
+          <select onchange="gaugeUpdate('shapeKind', this.value)" aria-label="Increase or decrease">
+            <option value="inc" ${g.shapeKind!=='dec'?'selected':''}>Increase</option>
+            <option value="dec" ${g.shapeKind==='dec'?'selected':''}>Decrease</option>
+          </select>
+          ${gaugeNum('shapeN','10','style="width:80px;" aria-label="Number of stitches"')}
+        </div>
+      </div>
+    </div>
+    <div id="g-out-shape">${buildGaugeShapeHTML()}</div>`)}
   `;
 }
 

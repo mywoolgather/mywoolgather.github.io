@@ -628,3 +628,10 @@
 .project-notes summary{ cursor:pointer; overflow:hidden; text-overflow:ellipsis; }
 .project-notes-full{ white-space:pre-wrap; margin-top:4px; color:var(--ink); font-size:0.82rem; }
 textarea{ resize:vertical; }
+
+/* Gauge calculator */
+.gauge-field{ display:flex; flex-direction:column; gap:4px; font-size:0.85rem; color:var(--ink-soft); }
+.gauge-summary{ cursor:pointer; font-weight:600; font-family:'Fraunces',serif; }
+.gauge-swatch-grid{ display:grid; grid-template-columns:auto 80px auto 80px auto; gap:8px; align-items:center; color:var(--ink); margin-top:4px; }
+.gauge-swatch-grid input{ width:100%; }
+.gauge-result-card{ background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:12px; font-size:0.9rem; }

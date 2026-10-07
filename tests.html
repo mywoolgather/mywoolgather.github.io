@@ -98,9 +98,34 @@
     ok('gauge 18 sts/4in = 18 per 4in', perRef(18,4,'in') === 18);
     ok('gauge 9 sts/2in = 18 per 4in', perRef(9,2,'in') === 18);
     ok('gauge 22 sts/10cm = 22 per 10cm', perRef(22,10,'cm') === 22);
-    const castOn = (stsPerUnit, width)=>Math.round(stsPerUnit*width);
-    ok('cast-on 4.5 sts/in × 20in = 90', castOn(4.5,20) === 90);
+    ok('cast-on 4.5 sts/in × 20in = 90', countForSize(20, 18, 4) === 90);
+    // The proportion from the Instagram slides: 14 sts & 12 rows per 10 cm.
+    ok('slides: 25 cm wide at 14 sts/10cm = 35 sts', countForSize(25, 14, 10) === 35);
+    ok('slides: 30 cm long at 12 rows/10cm = 36 rows', countForSize(30, 12, 10) === 36);
+    ok('gaugeRate needs both inputs', gaugeRate(14, 0) === null && gaugeRate('', 10) === null);
+    ok('countForSize no swatch = null', countForSize(25, '', 10) === null);
   }catch(e){ ok('gauge block threw: '+e.message, false); }
+
+  // --- Gauge helpers: multiples, pattern conversion, even shaping ---
+  try{
+    const m = nearestMultiples(35, 6, 2);   // valid: 32, 38
+    ok('multiple of 6+2 near 35 → 32 / 38', m.below===32 && m.above===38);
+    const exact = nearestMultiples(38, 6, 2);
+    ok('38 already fits 6+2', exact.below===38 && exact.above===38);
+    ok('multiple of 2 (even) near 35 → 34 / 36', (()=>{ const e=nearestMultiples(35,2,0); return e.below===34 && e.above===36; })());
+    ok('translate 80 sts @20/4in → @18/4in = 72', translateCount(80, 18/4, 20/4) === 72);
+    const inc = spreadShaping(60, 10, 'inc');
+    ok('60 sts +10 inc → 70, groups of 6', inc.result===70 && inc.groups.length===1 && inc.groups[0].size===6 && inc.groups[0].times===10);
+    const inc2 = spreadShaping(64, 10, 'inc');   // 4×7 + 6×6 = 64
+    ok('64 sts +10 inc → 4×7 + 6×6', inc2.groups[0].size===7 && inc2.groups[0].times===4 && inc2.groups[1].size===6 && inc2.groups[1].times===6);
+    const dec = spreadShaping(60, 12, 'dec');
+    ok('60 sts −12 dec → 48', dec.result===48 && dec.groups[0].size===5);
+    ok('too many decreases → error', !!spreadShaping(10, 6, 'dec').error);
+    ok('knit inc text', shapingRepeatText(6,'inc','knit') === 'K6, M1');
+    ok('crochet dec text', shapingRepeatText(5,'dec','crochet','sc') === '3 sc, sc2tog');
+    ok('US dc hint → UK tr', crochetTermHint('dc','us') === 'US dc = UK tr');
+    ok('UK dc hint → US sc', crochetTermHint('dc','uk').startsWith('UK dc = US sc'));
+  }catch(e){ ok('gauge helpers block threw: '+e.message, false); }
 
   // --- closenessPercent monotonic ---
   try{
