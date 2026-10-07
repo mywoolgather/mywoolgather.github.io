@@ -81,7 +81,7 @@ function wrapFormForMobile(innerHTML, title, saveCall, cancelCall){
 }
 /* Lock/unlock background scroll when a full-screen form is showing. */
 function syncFormScrollLock(){
-  const anyFormOpen = (STATE.showYarnForm || STATE.showProjectForm) && isMobile();
+  const anyFormOpen = (STATE.showYarnForm || STATE.showProjectForm || STATE.showPatternForm) && isMobile();
   document.body.classList.toggle('form-open', anyFormOpen);
 }
 
@@ -154,6 +154,13 @@ let STATE = {
     open:{ size:true }
   },
   stashSort: 'recent',
+  patterns: [],                   // pattern library
+  showPatternForm: false,
+  editingPatternId: null,
+  patternSearch: '',
+  patternFilterStatus: 'all',
+  patternFilterCraft: 'all',
+  patternSort: 'recent',
   projFilterStatus: 'All statuses',
   projSort: 'recent',
 };
@@ -185,7 +192,7 @@ let statusChartInstance = null;
 async function persist(){
   if(!STATE.user) return;
   try{
-    await window.FB.saveUserData(STATE.user.uid, { yarns: STATE.yarns, projects: STATE.projects, palettes: STATE.paletteSavedPalettes, shoppingList: STATE.shoppingList, prefs: {unitPref: STATE.unitPref, theme: STATE.theme, preferencesSetup: true, stashSort: STATE.stashSort, projSort: STATE.projSort} });
+    await window.FB.saveUserData(STATE.user.uid, { yarns: STATE.yarns, projects: STATE.projects, palettes: STATE.paletteSavedPalettes, shoppingList: STATE.shoppingList, patterns: STATE.patterns, prefs: {unitPref: STATE.unitPref, theme: STATE.theme, preferencesSetup: true, stashSort: STATE.stashSort, projSort: STATE.projSort, patternSort: STATE.patternSort} });
   }catch(e){
     console.error('Save failed', e);
     wgToast("Couldn't save to your account — check your connection and try again.", "error");
@@ -228,7 +235,7 @@ function flushPending(){
    only; not persisted to the account. */
 let _formSnapshot = null;
 function snapshotOpenForm(){
-  if(!(STATE.showYarnForm || STATE.showProjectForm || STATE.showShoppingForm)) { _formSnapshot = null; return; }
+  if(!(STATE.showYarnForm || STATE.showProjectForm || STATE.showShoppingForm || STATE.showPatternForm)) { _formSnapshot = null; return; }
   const form = document.querySelector('#inner-tab-content form, .fullscreen-form form');
   if(!form) return;
   const snap = {};
@@ -813,6 +820,7 @@ const ICONS = {
   package: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/></svg>',
   link: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h6"/></svg>',
   pencil: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>',
+  book: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5z"/><path d="M4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5"/></svg>',
   bookmark: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12a1 1 0 0 1 1 1v17l-7-4-7 4V4a1 1 0 0 1 1-1z"/></svg>',
   image: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>',
   dots: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="5" cy="12" r="0.6"/><circle cx="12" cy="12" r="0.6"/><circle cx="19" cy="12" r="0.6"/></svg>',
@@ -833,6 +841,7 @@ function tabRegistry(){
     { id:'overview', label:'Overview', icon:ICONS.clipboard, primary:true },
     { id:'stash', label:'Stash', icon:ICONS.package, primary:true, addLabel:'Add yarn' },
     { id:'projects', label:'Projects', icon:ICONS.sparkles, primary:true, addLabel:'Add project' },
+    { id:'patterns', label:'Patterns', icon:ICONS.book, addLabel:'Add pattern' },
     { id:'palette', label:'Palette lab', icon:ICONS.palette },
     { id:'showcase', label:'Showcase', icon:ICONS.image, addLabel:'Add project' },
     { id:'shopping', label:'Shopping list', icon:ICONS.cart },
@@ -924,7 +933,7 @@ function renderFab(tabs){
   if(!STATE.online) return '';   // read-only when offline — no add button
   const current = tabs.find(t=>t.id===STATE.tab);
   if(!current || !current.addLabel) return '';
-  const action = current.id==='stash' ? 'showYarnForm()' : 'showProjectForm()';
+  const action = current.id==='stash' ? 'showYarnForm()' : current.id==='patterns' ? 'showPatternForm()' : 'showProjectForm()';
   return `<button class="fab" onclick="${action}" aria-label="${esc(current.addLabel)}">${ICONS.plus}</button>`;
 }
 
@@ -1195,6 +1204,7 @@ async function startDeleteAccount(){
     // app holds their URLs; the auth-user teardown can't reach them after).
     const photoUrls = [];
     STATE.projects.forEach(p => (p.photos||[]).forEach(u => photoUrls.push(u)));
+    STATE.patterns.forEach(p => (p.files||[]).forEach(f => photoUrls.push(f.url)));
     for(const url of photoUrls){ try{ await window.FB.deletePhoto(url); }catch(e){} }
     await window.FB.deleteAccount();
     wgToast('Your account has been deleted.', 'success');
@@ -1319,6 +1329,7 @@ function renderTab(){
   if(STATE.tab==='overview') el.innerHTML = renderOverview();
   else if(STATE.tab==='stash') el.innerHTML = renderStash();
   else if(STATE.tab==='projects') el.innerHTML = renderProjects();
+  else if(STATE.tab==='patterns') el.innerHTML = renderPatterns();
   else if(STATE.tab==='palette') el.innerHTML = renderPalette();
   else if(STATE.tab==='showcase') el.innerHTML = renderShowcase();
   else if(STATE.tab==='shopping') el.innerHTML = renderShopping();
@@ -2081,7 +2092,8 @@ function exportStash(format){
       yarns: STATE.yarns,
       projects: STATE.projects,
       palettes: STATE.paletteSavedPalettes,
-      shoppingList: STATE.shoppingList
+      shoppingList: STATE.shoppingList,
+      patterns: STATE.patterns
     };
     downloadFile(`woolgather-backup-${stamp}.json`, JSON.stringify(payload, null, 2), 'application/json');
     wgToast('Backup downloaded.', 'success');
@@ -2329,10 +2341,14 @@ function cleanupOpenForms(){
     // to Storage during this session so nothing's left orphaned.
     pendingProjectPhotos.forEach(url => window.FB.deletePhoto(url));
   }
+  if(STATE.showPatternForm) discardPatternDraftFiles();
   STATE.showYarnForm = false;
   STATE.showProjectForm = false;
+  STATE.showPatternForm = false;
   STATE.editingYarnId = null;
   STATE.editingProjectId = null;
+  STATE.editingPatternId = null;
+  pendingProjectPatternId = null;
   pendingProjectYarnUsage = [];
   pendingProjectYarnRequired = [];
   pendingProjectPhotos = [];
@@ -2350,6 +2366,7 @@ function showProjectForm(id){
   pendingProjectYarnRequired = editing ? (editing.yarnRequired||[]).map(u=>({...u})) : [];
   pendingProjectPhotos = editing ? [...(editing.photos||[])] : [];
   pendingProjectCounters = editing ? (editing.counters||[]).map(c=>({...c})) : [];
+  pendingProjectPatternId = editing ? (editing.patternId||null) : null;
   renderTab();
 }
 function hideProjectForm(){ cleanupOpenForms(); renderTab(); }
@@ -2841,6 +2858,7 @@ function handleSaveProject(e){
     patternName: document.getElementById('pf-pattern').value.trim(),
     needleSize: document.getElementById('pf-needlesize').value.trim() || null,
     notes: document.getElementById('pf-notes').value.trim() || null,
+    patternId: pendingProjectPatternId || null,
     gauge: (()=>{
       const s = document.getElementById('pf-gauge-sts').value;
       const r = document.getElementById('pf-gauge-rows').value;
@@ -2945,7 +2963,7 @@ function renderProjectRow(p){
   return `<div class="project-row">
     <span class="status-dot" style="background:${STATUS_COLORS[p.status]}"></span>
     <div class="grow">
-      <p class="project-name">${esc(p.name)}${p.patternName ? ` <span class="pattern">— ${esc(p.patternName)}</span>` : ''}</p>
+      <p class="project-name">${esc(p.name)}${p.patternName ? ` <span class="pattern">— ${p.patternId && STATE.patterns.some(pt=>pt.id===p.patternId) ? `<button type="button" class="pattern-inline-link" onclick="openPatternInLibrary('${p.patternId}')" title="Open in pattern library">${ICONS.book} ${esc(p.patternName)}</button>` : esc(p.patternName)}</span>` : ''}</p>
       <div class="project-meta">
         ${usedYarns.map(y=>`<span class="dot" style="background:${y.colorHex}" title="${esc(y.name)}"></span>`).join('')}
         ${garmentBadge ? `<span class="note">${esc(garmentBadge)}</span>` : ''}
@@ -3745,9 +3763,18 @@ function gaugeUnit(){ return STATE.gauge.measUnit==='cm' ? 'cm' : 'in'; }
 function round1(n){ return Math.round(n*10)/10; }
 // Typing only refreshes the result panels (keeps focus); fields that change
 // labels (craft, unit, terms) re-render the whole tab.
+// Switch inches ↔ cm; swatch sizes still at the default (4 in / 10 cm)
+// follow along so the swatch reads naturally in the new unit.
+function gaugeSetUnit(unit){
+  const g = STATE.gauge, from = g.measUnit==='cm' ? 10 : 4, to = unit==='cm' ? 10 : 4;
+  if(Number(g.swW)===from || g.swW==='') g.swW = to;
+  if(Number(g.swH)===from || g.swH==='') g.swH = to;
+  g.measUnit = unit;
+}
 function gaugeUpdate(field, val){
+  if(field==='measUnit'){ gaugeSetUnit(val); renderTab(); return; }
   STATE.gauge[field] = val;
-  if(['craft','measUnit','terms'].includes(field)){ renderTab(); return; }
+  if(['craft','terms'].includes(field)){ renderTab(); return; }
   refreshGaugeOutputs();
 }
 function gaugeToggle(key, open){ STATE.gauge.open = { ...(STATE.gauge.open||{}), [key]: open }; }
@@ -3982,6 +4009,363 @@ function renderGauge(){
     </div>
     <div id="g-out-shape">${buildGaugeShapeHTML()}</div>`)}
   `;
+}
+
+/* =================================================================
+   Pattern library. Each pattern keeps its details (designer, craft, yarn
+   weight, yardage, hook/needle, gauge, skill, tags, status, notes), a
+   source link, and any uploaded PDFs/images. Files go to Firebase Storage
+   under patterns/{uid}/{patternId}/ — only their URLs live in the user's
+   Firestore doc, which has a 1 MB limit. Uploads happen as files are
+   picked (draft id reserved up front, like project photos); removals are
+   deferred until save so Cancel never loses a file.
+================================================================= */
+const PATTERN_STATUSES = [['saved','Saved'],['queued','In my queue'],['made','Made it']];
+const PATTERN_SKILLS = ['Beginner','Easy','Intermediate','Experienced'];
+const PATTERN_FILE_MAX = 20 * 1024 * 1024;   // matches the Storage rule
+let pendingPatternFiles = [];        // files currently on the form ({url,name,type,size})
+let pendingPatternUploads = [];      // URLs uploaded during this form session
+let pendingPatternRemovals = [];     // URLs removed during this form session
+let pendingProjectPatternId = null;  // pattern a new project was started from
+
+function patternStatusLabel(v){ const s = PATTERN_STATUSES.find(([k])=>k===v); return s ? s[1] : 'Saved'; }
+function showPatternForm(id){
+  if(!STATE.online){ wgToast("You're offline — view-only until you reconnect.", "error"); return; }
+  cleanupOpenForms();
+  STATE.tab = 'patterns';
+  STATE.showPatternForm = true;
+  STATE.editingPatternId = id || uid();
+  const editing = id ? STATE.patterns.find(p=>p.id===id) : null;
+  pendingPatternFiles = editing ? (editing.files||[]).map(f=>({ ...f })) : [];
+  pendingPatternUploads = [];
+  pendingPatternRemovals = [];
+  render();
+}
+function hidePatternForm(){ cleanupOpenForms(); renderTab(); }
+// Called from cleanupOpenForms: drop files uploaded for a form that's being
+// discarded (they were never saved anywhere).
+function discardPatternDraftFiles(){
+  pendingPatternUploads.forEach(url => window.FB.deletePhoto(url));
+  pendingPatternFiles = []; pendingPatternUploads = []; pendingPatternRemovals = [];
+}
+function buildPatternFilesHTML(){
+  if(!pendingPatternFiles.length) return '';
+  return `<div class="scrap-chips mt-2">${pendingPatternFiles.map((f,i)=>`<span class="scrap-chip">
+    <a href="${esc(f.url)}" target="_blank" rel="noopener" class="pattern-file-link">${/pdf/i.test(f.type||'')?'📄':'🖼️'} ${esc(f.name)}</a>
+    <button type="button" onclick="removePatternFile(${i})" aria-label="Remove file">✕</button></span>`).join('')}</div>`;
+}
+function refreshPatternFiles(){
+  const el = document.getElementById('patf-files');
+  if(el) el.innerHTML = buildPatternFilesHTML();
+}
+function onPatternFileDrop(e){
+  e.preventDefault();
+  e.currentTarget.classList.remove('dragover');
+  uploadPatternFiles(e.dataTransfer && e.dataTransfer.files);
+}
+async function uploadPatternFiles(fileList){
+  const files = [...(fileList||[])];
+  if(!files.length || !STATE.user) return;
+  const statusEl = document.getElementById('patf-status');
+  for(const file of files){
+    const isPdf = /pdf/i.test(file.type||'') || /\.pdf$/i.test(file.name||'');
+    if(!isPdf && !isAcceptableImageFile(file)){ wgToast(`${file.name}: only PDFs and images can be uploaded.`, 'error'); continue; }
+    if(file.size > PATTERN_FILE_MAX){ wgToast(`${file.name} is over 20 MB.`, 'error'); continue; }
+    if(statusEl) statusEl.textContent = `Uploading ${file.name}…`;
+    try{
+      // HEIC photos are converted so every browser can open them; other
+      // images and PDFs upload untouched so pattern text stays sharp.
+      const blob = isPdf ? file : await toRenderableImageBlob(file);
+      const type = isPdf ? 'application/pdf' : (blob.type || file.type || 'image/jpeg');
+      const ext = isPdf ? 'pdf' : (type.split('/')[1] || 'jpg').replace('jpeg','jpg');
+      const safe = (file.name||'pattern').replace(/\.[^.]+$/,'').replace(/[^\w\- ]+/g,'').trim().slice(0,60) || 'pattern';
+      const url = await window.FB.uploadPatternFile(STATE.user.uid, STATE.editingPatternId, blob, `${uid().slice(0,8)}-${safe}.${ext}`, type);
+      pendingPatternFiles.push({ url, name: file.name || `${safe}.${ext}`, type, size: blob.size||file.size||0 });
+      pendingPatternUploads.push(url);
+    }catch(err){
+      console.error('Pattern upload failed', err);
+      wgToast(`Couldn't upload ${file.name} — try again.`, 'error');
+    }
+  }
+  if(statusEl) statusEl.textContent = '';
+  refreshPatternFiles();
+}
+function removePatternFile(i){
+  const f = pendingPatternFiles[i];
+  if(!f) return;
+  pendingPatternFiles.splice(i,1);
+  pendingPatternRemovals.push(f.url);
+  refreshPatternFiles();
+}
+function renderPatternForm(){
+  const editing = STATE.patterns.find(p=>p.id===STATE.editingPatternId) || null;
+  const v = (field, fallback='') => editing ? esc(editing[field] ?? fallback) : fallback;
+  const g = (editing && editing.gauge) || {};
+  const inner = `
+  <form class="card form-grid" onsubmit="handleSavePattern(event)" style="margin-bottom:22px;">
+    <label class="field">Pattern name
+      <input id="patf-name" required placeholder="Gardenia Shawl" value="${v('name')}" />
+    </label>
+    <label class="field">Designer (optional)
+      <input id="patf-designer" value="${v('designer')}" />
+    </label>
+    <label class="field">Craft
+      <select id="patf-craft">${[['knit','Knit'],['crochet','Crochet'],['other','Other']].map(([k,l])=>`<option value="${k}" ${(editing?editing.craft:'knit')===k?'selected':''}>${l}</option>`).join('')}</select>
+    </label>
+    <label class="field">Status
+      <select id="patf-status">${PATTERN_STATUSES.map(([k,l])=>`<option value="${k}" ${(editing?editing.status:'saved')===k?'selected':''}>${l}</option>`).join('')}</select>
+    </label>
+    <div class="field span2">
+      <span class="note field-label">Pattern files (PDFs or images, up to 20 MB each — private to you)</span>
+      <label class="photo-dropzone" style="max-width:none;" ondragover="event.preventDefault(); this.classList.add('dragover');" ondragleave="this.classList.remove('dragover');" ondrop="onPatternFileDrop(event)">
+        <span class="note">${ICONS.upload} Drop files here or tap to choose</span>
+        <input type="file" accept="application/pdf,.pdf,image/*,.heic,.heif" multiple style="display:none;" onchange="uploadPatternFiles(this.files); this.value='';" />
+      </label>
+      <span id="patf-status" class="note" style="font-size:0.75rem;"></span>
+      <div id="patf-files">${buildPatternFilesHTML()}</div>
+    </div>
+    <label class="field span2">Source link (optional)
+      <input id="patf-url" type="url" placeholder="https://www.ravelry.com/patterns/library/…" value="${v('sourceUrl')}" />
+    </label>
+    <label class="field">Yarn weight (optional)
+      <select id="patf-weight"><option value="">—</option>${WEIGHTS.map(w=>`<option value="${w}" ${editing&&editing.weightCategory===w?'selected':''}>${esc(weightLabel(w))}</option>`).join('')}</select>
+    </label>
+    <label class="field">Yardage needed (${unitLabel()}, optional)
+      <input id="patf-yardage" type="number" min="0" step="any" value="${editing && editing.yardage ? toDisplayLength(editing.yardage) : ''}" />
+    </label>
+    <label class="field">Hook / needle size (optional)
+      <input id="patf-needle" placeholder="e.g. 4.5 mm / US 7" value="${v('needleSize')}" />
+    </label>
+    <label class="field">Skill level (optional)
+      <select id="patf-skill"><option value="">—</option>${PATTERN_SKILLS.map(s=>`<option ${editing&&editing.skillLevel===s?'selected':''}>${s}</option>`).join('')}</select>
+    </label>
+    <div class="field span2">
+      <span class="note" style="display:block; margin-bottom:4px;">Gauge the pattern calls for (optional)</span>
+      <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap; font-size:0.8rem; color:var(--ink-soft);">
+        <input id="patf-gauge-sts" type="number" min="0" step="any" placeholder="18" style="width:60px;" value="${esc(g.sts??'')}" /> sts ×
+        <input id="patf-gauge-rows" type="number" min="0" step="any" placeholder="24" style="width:60px;" value="${esc(g.rows??'')}" /> rows per
+        <select id="patf-gauge-unit">
+          <option value="in" ${g.unit==='cm'?'':'selected'}>4 in</option>
+          <option value="cm" ${g.unit==='cm'?'selected':''}>10 cm</option>
+        </select>
+      </div>
+    </div>
+    <label class="field span2">Tags (optional, comma-separated)
+      <input id="patf-tags" placeholder="sweater, top-down, gift" value="${editing ? esc((editing.tags||[]).join(', ')) : ''}" />
+    </label>
+    <label class="field span2">Notes (optional)
+      <textarea id="patf-notes" rows="3" placeholder="Sizes, modifications, errata…">${v('notes')}</textarea>
+    </label>
+    <div class="span2 form-actions-inline row-end">
+      <button type="button" class="btn btn-ghost" onclick="hidePatternForm()">Cancel</button>
+      <button type="submit" class="btn btn-primary">${editing ? 'Save changes' : 'Add pattern'}</button>
+    </div>
+  </form>`;
+  return wrapFormForMobile(inner, editing ? 'Edit pattern' : 'Add pattern', 'submitPatternForm()', 'hidePatternForm()');
+}
+function submitPatternForm(){
+  const f = document.querySelector('#inner-tab-content form, .fullscreen-form form');
+  if(f) f.requestSubmit ? f.requestSubmit() : f.querySelector('[type=submit]').click();
+}
+function handleSavePattern(e){
+  if(e) e.preventDefault();
+  const name = document.getElementById('patf-name').value.trim();
+  if(!name) return;
+  const existing = STATE.patterns.find(p=>p.id===STATE.editingPatternId);
+  const gs = document.getElementById('patf-gauge-sts').value, gr = document.getElementById('patf-gauge-rows').value;
+  const yd = document.getElementById('patf-yardage').value;
+  const fields = {
+    name,
+    designer: document.getElementById('patf-designer').value.trim() || null,
+    craft: document.getElementById('patf-craft').value,
+    status: document.getElementById('patf-status').value,
+    sourceUrl: document.getElementById('patf-url').value.trim() || null,
+    weightCategory: document.getElementById('patf-weight').value || null,
+    yardage: yd==='' ? null : Math.round(fromInputLength(yd)),
+    needleSize: document.getElementById('patf-needle').value.trim() || null,
+    skillLevel: document.getElementById('patf-skill').value || null,
+    gauge: (gs==='' && gr==='') ? null : { sts: gs===''?null:Number(gs), rows: gr===''?null:Number(gr), unit: document.getElementById('patf-gauge-unit').value },
+    tags: document.getElementById('patf-tags').value.split(',').map(t=>t.trim()).filter(Boolean),
+    notes: document.getElementById('patf-notes').value.trim() || null,
+    files: pendingPatternFiles.map(f=>({ ...f })),
+    updatedAt: new Date().toISOString()
+  };
+  if(existing){
+    STATE.patterns = STATE.patterns.map(p => p.id===existing.id ? { ...p, ...fields } : p);
+  } else {
+    STATE.patterns.push({ id: STATE.editingPatternId, ...fields, createdAt: todayStr() });
+  }
+  // Files removed on the form are only deleted now that the change is saved.
+  pendingPatternRemovals.forEach(url => window.FB.deletePhoto(url));
+  pendingPatternFiles = []; pendingPatternUploads = []; pendingPatternRemovals = [];
+  persist();
+  STATE.showPatternForm = false;
+  STATE.editingPatternId = null;
+  renderTab();
+  scrollToTop();
+}
+async function deletePattern(id){
+  const pat = STATE.patterns.find(p=>p.id===id);
+  if(!pat) return;
+  if(!(await wgConfirm(`Delete "${pat.name}" and its uploaded files? This cannot be undone.`, {title:'Delete pattern', okLabel:'Delete', danger:true}))) return;
+  (pat.files||[]).forEach(f => window.FB.deletePhoto(f.url));
+  STATE.patterns = STATE.patterns.filter(p=>p.id!==id);
+  STATE.projects = STATE.projects.map(p => p.patternId===id ? { ...p, patternId:null } : p);
+  persist();
+  renderTab();
+}
+function updatePatternStatus(id, status){
+  STATE.patterns = STATE.patterns.map(p => p.id===id ? { ...p, status, updatedAt:new Date().toISOString() } : p);
+  persist();
+}
+/* Stash check: which single stash yarns of the pattern's weight have enough
+   length on their own. */
+function patternStashMatches(pat){
+  if(!pat.weightCategory || !pat.yardage) return null;
+  const same = STATE.yarns.filter(y=>y.weightCategory===pat.weightCategory && (Number(y.yardageRemaining)||0)>0);
+  const enough = same.filter(y=>(Number(y.yardageRemaining)||0) >= pat.yardage)
+    .sort((a,b)=>(Number(b.yardageRemaining)||0)-(Number(a.yardageRemaining)||0));
+  const best = same.slice().sort((a,b)=>(Number(b.yardageRemaining)||0)-(Number(a.yardageRemaining)||0))[0] || null;
+  return { enough, best, sameCount: same.length };
+}
+function renderPatternStashLine(pat){
+  const m = patternStashMatches(pat);
+  if(!m) return '';
+  if(m.enough.length){
+    return `<details class="note pattern-stash"><summary class="ok-text">🧶 ${m.enough.length} stash yarn${m.enough.length===1?' has':'s have'} enough</summary>
+      <div class="scrap-chips mt-1">${m.enough.slice(0,8).map(y=>`<span class="scrap-chip"><span class="dot" style="background:${y.colorHex}; width:9px; height:9px; border-radius:50%; display:inline-block;"></span> ${esc(yarnDisplayName(y))} (${toDisplayLength(y.yardageRemaining)} ${unitLabel()})&nbsp;</span>`).join('')}</div>
+    </details>`;
+  }
+  if(m.best) return `<p class="note pattern-stash no-margin">🧶 No single ${esc(pat.weightCategory)} yarn has ${toDisplayLength(pat.yardage)} ${unitLabel()} — most is ${esc(yarnDisplayName(m.best))} (${toDisplayLength(m.best.yardageRemaining)} ${unitLabel()})</p>`;
+  return `<p class="note pattern-stash no-margin">🧶 No ${esc(pat.weightCategory)} yarn in your stash yet</p>`;
+}
+/* Start a project from a pattern: open the project form pre-filled with the
+   pattern's name, hook/needle and gauge, linked back to the pattern. */
+function startProjectFromPattern(id){
+  const pat = STATE.patterns.find(p=>p.id===id);
+  if(!pat) return;
+  cleanupOpenForms();
+  STATE.tab = 'projects';
+  showProjectForm();
+  pendingProjectPatternId = pat.id;
+  if(pat.sourceUrl) pendingProjectLinks = [{ id: uid(), url: pat.sourceUrl, type:'link', title: pat.name, thumbnail:null }];
+  render();
+  const set = (elId, val) => { const el = document.getElementById(elId); if(el && val!=null) el.value = val; };
+  set('pf-name', pat.name);
+  set('pf-pattern', pat.name);
+  set('pf-needlesize', pat.needleSize);
+  if(pat.gauge){ set('pf-gauge-sts', pat.gauge.sts); set('pf-gauge-rows', pat.gauge.rows); set('pf-gauge-unit', pat.gauge.unit||'in'); }
+}
+/* Load the pattern's gauge into the calculator as the target to compare to. */
+function patternToGauge(id){
+  const pat = STATE.patterns.find(p=>p.id===id);
+  if(!pat) return;
+  const g = STATE.gauge;
+  if(pat.craft==='knit' || pat.craft==='crochet') g.craft = pat.craft;
+  if(pat.needleSize) g.needleSize = pat.needleSize;
+  if(pat.gauge){
+    gaugeSetUnit(pat.gauge.unit==='cm' ? 'cm' : 'in');
+    g.targetSts = pat.gauge.sts ?? '';
+    g.targetRows = pat.gauge.rows ?? '';
+  }
+  g._unitInit = true;
+  g.open = { ...(g.open||{}), compare:true };
+  switchTab('gauge');
+}
+function openPatternInLibrary(id){
+  const pat = STATE.patterns.find(p=>p.id===id);
+  if(!pat) return;
+  STATE.patternSearch = pat.name;
+  STATE.patternFilterStatus = 'all';
+  switchTab('patterns');
+}
+function renderPatternCard(pat){
+  const meta = [
+    pat.craft && pat.craft!=='other' ? (pat.craft==='crochet'?'Crochet':'Knit') : null,
+    pat.weightCategory ? weightLabel(pat.weightCategory) : null,
+    pat.yardage ? `${toDisplayLength(pat.yardage)} ${unitLabel()}` : null,
+    pat.needleSize ? `🪡 ${pat.needleSize}` : null,
+    pat.gauge && (pat.gauge.sts||pat.gauge.rows) ? `📐 ${pat.gauge.sts||'?'}×${pat.gauge.rows||'?'}/${pat.gauge.unit==='cm'?'10cm':'4in'}` : null,
+    pat.skillLevel
+  ].filter(Boolean);
+  const projects = STATE.projects.filter(p=>p.patternId===pat.id);
+  return `<div class="card pattern-card">
+    <div class="row-between" style="align-items:flex-start;">
+      <div class="grow">
+        <p class="project-name" style="font-family:'Fraunces',serif; font-weight:600; font-size:1rem;">${esc(pat.name)}</p>
+        ${pat.designer ? `<p class="note no-margin">by ${esc(pat.designer)}</p>` : ''}
+      </div>
+      <select class="status-select" onchange="updatePatternStatus('${pat.id}', this.value)" aria-label="Pattern status">
+        ${PATTERN_STATUSES.map(([k,l])=>`<option value="${k}" ${pat.status===k?'selected':''}>${l}</option>`).join('')}
+      </select>
+    </div>
+    ${meta.length ? `<p class="note" style="margin:6px 0 0;">${meta.map(esc).join(' · ')}</p>` : ''}
+    ${(pat.tags||[]).length ? `<div class="scrap-chips mt-1">${pat.tags.map(t=>`<button type="button" class="pattern-tag" onclick="setPatternSearch(${esc(JSON.stringify(t))}, true)">#${esc(t)}</button>`).join('')}</div>` : ''}
+    ${(pat.files||[]).length || pat.sourceUrl ? `<div class="link-strip">
+      ${(pat.files||[]).map(f=>`<a class="link-card generic" href="${esc(f.url)}" target="_blank" rel="noopener">${/pdf/i.test(f.type||'')?'📄':'🖼️'}<span class="link-title">${esc(f.name)}</span></a>`).join('')}
+      ${pat.sourceUrl ? `<a class="link-card generic" href="${esc(pat.sourceUrl)}" target="_blank" rel="noopener">${ICONS.link}<span class="link-title">${esc(linkHostname(pat.sourceUrl))}</span></a>` : ''}
+    </div>` : ''}
+    ${pat.notes ? renderProjectNotes(pat.notes) : ''}
+    ${renderPatternStashLine(pat)}
+    ${projects.length ? `<p class="note" style="margin:6px 0 0; font-size:0.72rem;">Projects: ${projects.map(p=>esc(p.name)).join(', ')}</p>` : ''}
+    <div class="row mt-3">
+      ${STATE.online ? `<button class="btn btn-ghost btn-small" onclick="startProjectFromPattern('${pat.id}')">${ICONS.sparkles} Start project</button>` : ''}
+      ${pat.gauge && (pat.gauge.sts||pat.gauge.rows) ? `<button class="btn btn-ghost btn-small" onclick="patternToGauge('${pat.id}')">📐 Check my gauge</button>` : ''}
+      <span class="grow"></span>
+      <span style="display:inline-flex; gap:4px;">
+        <button class="del-btn" onclick="showPatternForm('${pat.id}')" aria-label="Edit pattern">${ICONS.pencil}</button>
+        <button class="del-btn" onclick="deletePattern('${pat.id}')" aria-label="Delete pattern">${ICONS.trash}</button>
+      </span>
+    </div>
+  </div>`;
+}
+function linkHostname(url){ try{ return new URL(url).hostname.replace(/^www\./,''); }catch(e){ return 'Link'; } }
+function setPatternSearch(v, rerender){
+  STATE.patternSearch = v;
+  if(rerender){ renderTab(); return; }
+  const grid = document.getElementById('pattern-grid');
+  if(grid) grid.innerHTML = filteredSortedPatterns().map(renderPatternCard).join('');
+}
+function filteredSortedPatterns(){
+  let list = [...STATE.patterns];
+  const q = (STATE.patternSearch||'').toLowerCase().trim();
+  if(q) list = list.filter(p=>[p.name,p.designer,p.notes,...(p.tags||[])].filter(Boolean).some(f=>f.toLowerCase().includes(q)));
+  const fs = STATE.patternFilterStatus;
+  if(fs && fs!=='all') list = list.filter(p=>(p.status||'saved')===fs);
+  const fc = STATE.patternFilterCraft;
+  if(fc && fc!=='all') list = list.filter(p=>p.craft===fc);
+  const sort = STATE.patternSort || 'recent';
+  if(sort==='name') list.sort((a,b)=>a.name.localeCompare(b.name));
+  else if(sort==='updated') list.sort((a,b)=>updatedKey(b).localeCompare(updatedKey(a)));
+  else list.reverse();
+  return list;
+}
+function renderPatterns(){
+  let html = `<div class="row-between mb-4">
+    <p class="note">${STATE.patterns.length} pattern${STATE.patterns.length===1?'':'s'}</p>
+    ${!STATE.showPatternForm && STATE.online ? `<button class="btn btn-primary" onclick="showPatternForm()">${ICONS.plus} Add pattern</button>` : ''}
+  </div>`;
+  if(STATE.showPatternForm) html += renderPatternForm();
+  if(STATE.patterns.length===0){
+    html += `<div class="empty"><p class="title">Your pattern library is empty</p><p class="body">Save patterns you own or want to make — upload the PDF, note the yarn and gauge, and see what in your stash could work. Start a project from any pattern.</p></div>`;
+    return html;
+  }
+  html += `<div class="stash-controls">
+    <input type="text" placeholder="Search name, designer, tag…" value="${esc(STATE.patternSearch||'')}" oninput="setPatternSearch(this.value)" style="flex:1; min-width:140px;" aria-label="Search patterns" />
+    <select onchange="STATE.patternFilterStatus=this.value; renderTab();" aria-label="Filter by status">
+      ${[['all','All statuses'],...PATTERN_STATUSES].map(([k,l])=>`<option value="${k}" ${(STATE.patternFilterStatus||'all')===k?'selected':''}>${l}</option>`).join('')}
+    </select>
+    <select onchange="STATE.patternFilterCraft=this.value; renderTab();" aria-label="Filter by craft">
+      ${[['all','Knit & crochet'],['knit','Knit'],['crochet','Crochet'],['other','Other']].map(([k,l])=>`<option value="${k}" ${(STATE.patternFilterCraft||'all')===k?'selected':''}>${l}</option>`).join('')}
+    </select>
+    <select onchange="setSort('patternSort', this.value)" aria-label="Sort patterns">
+      ${[['recent','Newest'],['updated','Recently updated'],['name','Name A–Z']].map(([k,l])=>`<option value="${k}" ${(STATE.patternSort||'recent')===k?'selected':''}>${l}</option>`).join('')}
+    </select>
+  </div>`;
+  const shown = filteredSortedPatterns();
+  if(!shown.length) html += `<div class="empty"><p class="title">No matches</p><p class="body">No patterns match your search or filters.</p></div>`;
+  html += `<div class="pattern-grid" id="pattern-grid">${shown.map(renderPatternCard).join('')}</div>`;
+  return html;
 }
 
 function renderShopping(){
@@ -4293,6 +4677,7 @@ function initApp(){
       STATE.projects = (data && data.projects) || [];
       STATE.paletteSavedPalettes = (data && data.palettes) || [];
       STATE.shoppingList = (data && data.shoppingList) || [];
+      STATE.patterns = (data && data.patterns) || [];
 
       STATE.unitPref =
         (data && data.prefs && data.prefs.unitPref) || 'yd';
@@ -4307,6 +4692,7 @@ function initApp(){
       // Remembered sort choices (filters stay session-only).
       STATE.stashSort = (data && data.prefs && data.prefs.stashSort) || 'recent';
       STATE.projSort = (data && data.prefs && data.prefs.projSort) || 'recent';
+      STATE.patternSort = (data && data.prefs && data.prefs.patternSort) || 'recent';
 
       applyTheme();
 

@@ -71,6 +71,11 @@
       { id:'pal1', name:'Garden Complementary', harmony:'Complementary', matchMode:'balanced', baseYarnId:'y3', slots:[{ role:'Complement', yarnId:'y2', hex:'#a8342e', closeness:74 }], createdAt:'2025-11-01' },
       { id:'pal2', name:'Autumn Triad', harmony:'Triadic', matchMode:'balanced', baseYarnId:'y6', slots:[{ role:'Triad', yarnId:'y5', hex:'#3c7a72', closeness:68 },{ role:'Triad', yarnId:'y12', hex:'#5c3a72', closeness:61 }], createdAt:'2026-01-30' }
     ],
+    patterns: [
+      { id:'pt1', name:'Gardenia Shawl', designer:'Demo Designs', craft:'crochet', status:'made', sourceUrl:null, weightCategory:'Sport', yardage:700, needleSize:'4 mm', skillLevel:'Easy', gauge:{ sts:20, rows:12, unit:'cm' }, tags:['shawl','gift'], notes:'Made for Mom — blocked to 150 cm wide.', files:[], createdAt:'2025-10-30' },
+      { id:'pt2', name:'Nordic Nights Pullover', designer:'Demo Designs', craft:'knit', status:'queued', sourceUrl:null, weightCategory:'Worsted', yardage:1500, needleSize:'US 8 / 5 mm', skillLevel:'Intermediate', gauge:{ sts:18, rows:24, unit:'in' }, tags:['sweater','colorwork'], notes:null, files:[], createdAt:'2026-02-09' },
+      { id:'pt3', name:'Summer Net Bag', designer:null, craft:'crochet', status:'saved', sourceUrl:null, weightCategory:'Worsted', yardage:300, needleSize:'5 mm', skillLevel:'Beginner', gauge:null, tags:['bag'], notes:null, files:[], createdAt:'2026-02-01' }
+    ],
     shoppingList: [
       { id:'s1', colorName:'Red', hex:'#a8342e', weight:'Worsted', fiber:'wool', yardage:200, quantity:2, note:'Complementary palette', sourceType:'palette', sourceId:'pal2', sourceName:'Autumn Triad palette', done:false, createdAt:'2026-02-09' },
       { id:'s2', colorName:'Charcoal 900', hex:'#3a3a3d', weight:'Worsted', fiber:'100% Peruvian Highland Wool', yardage:600, quantity:1, note:'Project gap — Dad\'s Sweater needs more Charcoal 900 to finish the body', sourceType:'project', sourceId:'p3', sourceName:"Dad's Sweater", done:false, createdAt:'2026-02-10' }
@@ -105,7 +110,8 @@
         yarns: store.yarns,
         projects: store.projects,
         palettes: store.palettes,
-        shoppingList: store.shoppingList
+        shoppingList: store.shoppingList,
+        patterns: store.patterns
       };
     },
     async saveUserData(uid, data){
@@ -114,6 +120,7 @@
       store.projects = data.projects || [];
       store.palettes = data.palettes || [];
       store.shoppingList = data.shoppingList || [];
+      store.patterns = data.patterns || [];
     },
     async loadPresets(){ return PRESETS; },
     async seedPresetsIfEmpty(){ return; },
@@ -123,6 +130,7 @@
       // for the session without any storage backend.
       return URL.createObjectURL(blob);
     },
+    async uploadPatternFile(uid, patternId, blob){ return URL.createObjectURL(blob); },
     async deletePhoto(){ return; },
     async deleteAccount(){ return; },        // no-op in demo
     async sendSupport(){ return; }

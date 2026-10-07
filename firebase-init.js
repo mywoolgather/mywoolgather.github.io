@@ -112,6 +112,15 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/fireba
       await uploadBytes(storageRef, blob);
       return await getDownloadURL(storageRef);
     },
+    // Pattern library files (PDFs/images), stored under
+    // patterns/{uid}/{patternId}/{filename}. contentType is set explicitly so
+    // the Storage rule (PDF or image only) can check it.
+    async uploadPatternFile(uid, patternId, blob, filename, contentType){
+      const storageRef = ref(storage, `patterns/${uid}/${patternId}/${filename}`);
+      await uploadBytes(storageRef, blob, { contentType });
+      return await getDownloadURL(storageRef);
+    },
+    // Deletes any Storage file by its download URL (photos and pattern files).
     async deletePhoto(url){
       try{ await deleteObject(ref(storage, url)); }
       catch(e){ /* already gone or never existed — nothing to clean up */ }

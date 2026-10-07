@@ -644,3 +644,15 @@ textarea{ resize:vertical; }
 .scrap-chip{ display:inline-flex; align-items:center; gap:2px; border:1px solid var(--border); border-radius:999px; padding:1px 4px 1px 8px; font-size:0.72rem; background:var(--bg); color:var(--ink); }
 .scrap-chip button{ background:none; border:none; cursor:pointer; color:var(--ink-soft); font-size:0.68rem; padding:2px 4px; font-family:inherit; }
 .scrap-chip .scrap-chip-main{ color:var(--ink); font-size:0.72rem; padding:0; text-decoration:underline dotted; }
+
+/* Pattern library */
+.pattern-grid{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+@media (max-width:760px){ .pattern-grid{ grid-template-columns:minmax(0,1fr); } }
+.pattern-card{ min-width:0; display:flex; flex-direction:column; }
+.pattern-card .project-name{ margin:0; }
+.pattern-stash{ margin-top:8px; }
+.pattern-stash summary{ cursor:pointer; }
+.pattern-tag{ background:none; border:1px solid var(--border); border-radius:999px; padding:1px 8px; font-size:0.7rem; color:var(--ink-soft); cursor:pointer; font-family:inherit; }
+.pattern-file-link{ color:var(--ink); text-decoration:none; }
+.pattern-inline-link{ background:none; border:none; padding:0; font:inherit; color:var(--plum); cursor:pointer; text-decoration:underline dotted; }
+.pattern-inline-link .icon{ width:13px; height:13px; }
