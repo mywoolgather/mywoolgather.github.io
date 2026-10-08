@@ -915,7 +915,23 @@ function render(){
     ${renderFab(tabs)}
     ${renderMoreSheet(tabs)}
   `;
+  fitTabs();
   renderTab();
+}
+/* Desktop tab row: one line if the tabs fit (tightening the spacing first),
+   otherwise two even rows — never a lone tab wrapped onto a second line. */
+function fitTabs(){
+  const nav = document.querySelector('nav.tabs');
+  if(!nav || !nav.offsetParent) return;          // hidden on mobile
+  const n = nav.children.length;
+  nav.style.setProperty('--tab-cols', Math.ceil(n/2));
+  nav.classList.remove('tight', 'two-rows');
+  const overflows = () => nav.scrollWidth > nav.clientWidth + 1;
+  if(!overflows()) return;
+  nav.classList.add('tight');
+  if(!overflows()) return;
+  nav.classList.remove('tight');
+  nav.classList.add('two-rows');
 }
 
 function renderMobileNav(tabs){
@@ -5275,16 +5291,12 @@ function renderPatternCard(pat){
   const coverFile = cover && (pat.files||[]).find(f=>patternFilePreviews(f).includes(cover));
   return `<div class="card pattern-card">
     ${cover ? `<a class="pattern-cover" href="${esc(coverFile.url)}" target="_blank" rel="noopener" aria-label="Open ${esc(coverFile.name)}"><img src="${esc(cover)}" alt="" loading="lazy" /></a>` : ''}
-    <div class="row-between" style="align-items:flex-start;">
-      <div class="grow">
-        <p class="project-name" style="font-family:'Fraunces',serif; font-weight:600; font-size:1rem;">${esc(pat.name)}</p>
-        ${pat.designer ? `<p class="note no-margin">by ${esc(pat.designer)}</p>` : ''}
-      </div>
-      <select class="status-select" onchange="updatePatternStatus('${pat.id}', this.value)" aria-label="Pattern status">
+    <p class="project-name pattern-title">${esc(pat.name)}</p>
+    ${pat.designer ? `<p class="note no-margin pattern-designer">by ${esc(pat.designer)}</p>` : ''}
+    <select class="status-select pattern-status" onchange="updatePatternStatus('${pat.id}', this.value)" aria-label="Pattern status">
         ${PATTERN_STATUSES.map(([k,l])=>`<option value="${k}" ${pat.status===k?'selected':''}>${l}</option>`).join('')}
-      </select>
-    </div>
-    ${meta.length ? `<p class="note" style="margin:6px 0 0;">${meta.map(esc).join(' · ')}</p>` : ''}
+    </select>
+    ${meta.length ? `<p class="note pattern-meta">${meta.map(esc).join(' · ')}</p>` : ''}
     ${(pat.tags||[]).length ? `<div class="scrap-chips mt-1">${pat.tags.map(t=>`<button type="button" class="pattern-tag" onclick="setPatternSearch(${esc(JSON.stringify(t))}, true)">#${esc(t)}</button>`).join('')}</div>` : ''}
     ${(pat.files||[]).length || pat.sourceUrl ? `<div class="link-strip">
       ${(pat.files||[]).map(f=>patternFilePreview(f, cover)
@@ -5295,11 +5307,10 @@ function renderPatternCard(pat){
     ${pat.notes ? renderProjectNotes(pat.notes) : ''}
     ${renderPatternStashLine(pat)}
     ${projects.length ? `<p class="note" style="margin:6px 0 0; font-size:0.72rem;">Projects: ${projects.map(p=>esc(p.name)).join(', ')}</p>` : ''}
-    <div class="row mt-3">
+    <div class="pattern-actions">
       ${STATE.online ? `<button class="btn btn-ghost btn-small" onclick="startProjectFromPattern('${pat.id}')">${ICONS.sparkles} Start project</button>` : ''}
-      ${pat.gauge && (pat.gauge.sts||pat.gauge.rows) ? `<button class="btn btn-ghost btn-small" onclick="patternToGauge('${pat.id}')">📐 Check my gauge</button>` : ''}
-      <span class="grow"></span>
-      <span style="display:inline-flex; gap:4px;">
+      ${pat.gauge && (pat.gauge.sts||pat.gauge.rows) ? `<button class="btn btn-ghost btn-small" onclick="patternToGauge('${pat.id}')">📐 Check gauge</button>` : ''}
+      <span class="pattern-edit">
         <button class="del-btn" onclick="showPatternForm('${pat.id}')" aria-label="Edit pattern">${ICONS.pencil}</button>
         <button class="del-btn" onclick="deletePattern('${pat.id}')" aria-label="Delete pattern">${ICONS.trash}</button>
       </span>
@@ -5629,12 +5640,15 @@ function initApp(){
   // through rotation/resize. Debounced, and only fires on an actual
   // breakpoint crossing rather than every pixel of resize.
   let wasMobile = isMobile();
+  // Tab widths change once the web font arrives.
+  if(document.fonts && document.fonts.ready) document.fonts.ready.then(fitTabs);
   let resizeTimer = null;
   window.addEventListener('resize', () => {
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
       const nowMobile = isMobile();
       if(nowMobile !== wasMobile){ wasMobile = nowMobile; if(STATE.authChecked && STATE.user) render(); }
+      else fitTabs();
     }, 150);
   });
 
