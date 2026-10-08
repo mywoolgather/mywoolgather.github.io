@@ -4548,6 +4548,342 @@ function commitOrderImport(){
 }
 
 /* =================================================================
+   Pattern PDF reader — entirely in the browser with PDF.js (Mozilla's
+   open-source PDF renderer), loaded only the first time a PDF is added.
+   Two jobs, both deterministic:
+   1. Preview: pull out the largest photo embedded in the first pages
+      (usually the cover shot); if there is none, draw page 1 instead.
+   2. Details: read the PDF's text layer and pick out name, designer,
+      gauge, hook/needle, yardage, yarn weight, craft and skill level with
+      plain pattern-matching rules (parsePatternText). Scanned PDFs with no
+      text layer get a preview only — there's no OCR here.
+================================================================= */
+const PDFJS_BASE = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/';
+const PDF_TEXT_PAGES = 5;     // gauge/materials are almost always up front
+const PDF_IMAGE_PAGES = 3;
+const PDF_THUMB_MAX = 800;    // px, longest side of the stored preview
+let pdfjsPromise = null;
+function loadPdfJs(){
+  if(!pdfjsPromise){
+    pdfjsPromise = import(PDFJS_BASE + 'pdf.min.mjs').then(lib => {
+      lib.GlobalWorkerOptions.workerSrc = PDFJS_BASE + 'pdf.worker.min.mjs';
+      return lib;
+    }).catch(err => { pdfjsPromise = null; throw err; });
+  }
+  return pdfjsPromise;
+}
+async function analyzePatternPdf(file){
+  const lib = await loadPdfJs();
+  const doc = await lib.getDocument({ data: new Uint8Array(await file.arrayBuffer()), isEvalSupported:false }).promise;
+  try{
+    const lines = [];
+    let best = null;
+    for(let n = 1; n <= Math.min(doc.numPages, Math.max(PDF_TEXT_PAGES, PDF_IMAGE_PAGES)); n++){
+      const page = await doc.getPage(n);
+      if(n <= PDF_TEXT_PAGES) lines.push(...pdfTextLines(await page.getTextContent(), n));
+      if(n <= PDF_IMAGE_PAGES){
+        const img = await largestPdfImage(page, lib.OPS).catch(() => null);
+        // Page 1 gets a head start: the cover photo beats a bigger step photo later on.
+        if(img && (!best || img.score * (n===1 ? 1.5 : 1) > best.score)) best = img;
+      }
+    }
+    let thumb = best ? await pdfImageToJpeg(best.img).catch(() => null) : null;
+    if(!thumb) thumb = await renderPdfPageToJpeg(await doc.getPage(1)).catch(() => null);
+    return { thumb, hasText: lines.some(l => /[a-z]{3}/i.test(l.text)), found: parsePatternText(lines) };
+  } finally {
+    doc.destroy();
+  }
+}
+/* Text items → visual lines (same baseline), keeping font size so the title
+   can be picked out as the biggest text on page 1. */
+function pdfTextLines(content, pageNum){
+  const items = content.items.filter(it => it.str && it.str.trim())
+    .map(it => ({ str: it.str, x: it.transform[4], y: it.transform[5], w: it.width||0, size: Math.hypot(it.transform[2], it.transform[3]) || it.height || 10 }));
+  items.sort((a,b) => (b.y - a.y) || (a.x - b.x));
+  const lines = [];
+  let cur = null;
+  for(const it of items){
+    if(cur && Math.abs(it.y - cur.y) <= Math.max(cur.size, it.size) * 0.5){
+      const gap = it.x - cur.endX;
+      const needSpace = !/\s$/.test(cur.text) && !/^\s/.test(it.str) && gap > Math.min(cur.size, it.size) * 0.15;
+      cur.text += (needSpace ? ' ' : '') + it.str;
+      cur.endX = it.x + it.w;
+      cur.size = Math.max(cur.size, it.size);
+    } else {
+      cur = { text: it.str, y: it.y, endX: it.x + it.w, size: it.size, page: pageNum };
+      lines.push(cur);
+    }
+  }
+  return lines.map(l => ({ text: l.text.replace(/\s+/g,' ').trim(), size: Math.round(l.size*10)/10, page: l.page }));
+}
+/* Walks page 1's drawing operations, tracking how much the current transform
+   scales things (its determinant), so each embedded image is scored by the
+   area it actually covers on the page — not its pixel count, since tiny
+   logos are often high-res. Thin banners and icons are skipped. */
+async function largestPdfImage(page, OPS){
+  const ops = await page.getOperatorList();
+  const view = page.view;
+  const pageArea = Math.abs((view[2]-view[0]) * (view[3]-view[1])) || 1;
+  const stack = [];
+  let det = 1;
+  const candidates = [];
+  for(let i = 0; i < ops.fnArray.length; i++){
+    const fn = ops.fnArray[i], args = ops.argsArray[i];
+    if(fn === OPS.save) stack.push(det);
+    else if(fn === OPS.restore) det = stack.length ? stack.pop() : det;
+    else if(fn === OPS.transform) det *= args[0]*args[3] - args[1]*args[2];
+    else if(fn === OPS.paintFormXObjectBegin){
+      stack.push(det);
+      const m = args[0];
+      if(m) det *= m[0]*m[3] - m[1]*m[2];
+    }
+    else if(fn === OPS.paintFormXObjectEnd) det = stack.length ? stack.pop() : det;
+    else if(fn === OPS.paintImageXObject){
+      const [id, w, h] = args;
+      if(!w || !h || Math.min(w,h) < 120 || Math.max(w,h)/Math.min(w,h) > 3) continue;
+      const share = Math.abs(det) / pageArea;
+      if(share < 0.04) continue;
+      candidates.push({ id, score: share });
+    }
+  }
+  candidates.sort((a,b) => b.score - a.score);
+  for(const c of candidates.slice(0, 3)){
+    const img = await pdfObject(page, c.id);
+    if(img && (img.bitmap || (img.data && (img.kind === 2 || img.kind === 3)))) return { img, score: c.score };
+  }
+  return null;
+}
+function pdfObject(page, id){
+  const objs = String(id).startsWith('g_') ? page.commonObjs : page.objs;
+  return new Promise(resolve => {
+    const timer = setTimeout(() => resolve(null), 4000);
+    try{ objs.get(id, obj => { clearTimeout(timer); resolve(obj); }); }
+    catch(e){ clearTimeout(timer); resolve(null); }
+  });
+}
+function pdfImageToJpeg(img){
+  const w = img.width || (img.bitmap && img.bitmap.width), h = img.height || (img.bitmap && img.bitmap.height);
+  let src;
+  if(img.bitmap) src = img.bitmap;
+  else {
+    src = document.createElement('canvas');
+    src.width = w; src.height = h;
+    let rgba = img.data;
+    if(img.kind === 2){                        // RGB → RGBA
+      rgba = new Uint8ClampedArray(w*h*4);
+      for(let p = 0, q = 0; p < w*h*3; p += 3, q += 4){ rgba[q]=img.data[p]; rgba[q+1]=img.data[p+1]; rgba[q+2]=img.data[p+2]; rgba[q+3]=255; }
+    }
+    src.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, w*h*4), w, h), 0, 0);
+  }
+  return canvasToJpeg(src, w, h);
+}
+async function renderPdfPageToJpeg(page){
+  const base = page.getViewport({ scale: 1 });
+  const viewport = page.getViewport({ scale: PDF_THUMB_MAX / Math.max(base.width, base.height) });
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(viewport.width); canvas.height = Math.round(viewport.height);
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  await page.render({ canvasContext: ctx, viewport }).promise;
+  return canvasToJpeg(canvas, canvas.width, canvas.height);
+}
+// Scales into a white-backed canvas (transparent areas would turn black as JPEG).
+function canvasToJpeg(src, w, h){
+  const k = Math.min(1, PDF_THUMB_MAX / Math.max(w, h));
+  const out = document.createElement('canvas');
+  out.width = Math.max(1, Math.round(w*k)); out.height = Math.max(1, Math.round(h*k));
+  const ctx = out.getContext('2d');
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, out.width, out.height);
+  ctx.drawImage(src, 0, 0, out.width, out.height);
+  return new Promise((resolve, reject) => out.toBlob(b => b ? resolve(b) : reject(new Error('Could not make preview')), 'image/jpeg', 0.82));
+}
+
+/* Pure: pattern text lines ({text,size,page} or plain strings) → whatever
+   details can be found; anything not found is null. Rules, not guesses: each
+   field needs its own keyword nearby, so prose rarely trips them. */
+function parsePatternText(lines){
+  const L = (lines||[]).map(l => typeof l === 'string' ? { text:l, size:10, page:1 } : l).filter(l => l.text && l.text.trim());
+  const text = L.map(l => l.text).join('\n').replace(/[’‘]/g, "'").replace(/[“”″]/g, '"').replace(/[–—]/g, '-');
+  const flat = text.replace(/\s+/g, ' ');
+  return {
+    name: patternTitleFromLines(L),
+    designer: patternDesignerFromText(text),
+    craft: patternCraftFromText(flat),
+    gauge: patternGaugeFromText(flat),
+    needleSize: patternNeedleFromText(flat),
+    yardage: patternYardageFromText(flat),
+    weightCategory: patternWeightFromText(flat),
+    skillLevel: patternSkillFromText(text)
+  };
+}
+const PDF_GENERIC_TITLE = /^(?:free\s+)?(?:knit(?:ting)?|crochet|pattern|knitting pattern|crochet pattern|free pattern|materials|gauge|tension|notes?|abbreviations|instructions|sizes?|page \d+|\d+)$/i;
+function patternTitleFromLines(L){
+  const first = L.filter(l => (l.page||1) === 1);
+  const usable = first.filter(l => /[a-z]{2}/i.test(l.text) && l.text.length <= 80 && !PDF_GENERIC_TITLE.test(l.text.trim())
+    && !/^(?:designed\s+by|design\s+by|pattern\s+by|by\s|©|copyright|www\.|https?:)/i.test(l.text.trim()));
+  if(!usable.length) return null;
+  const top = Math.max(...usable.map(l => l.size||0));
+  const idx = first.indexOf(usable.find(l => (l.size||0) === top));
+  // A title can wrap: take the next line too if it's the same size.
+  let title = first[idx].text.trim();
+  const next = first[idx+1];
+  if(next && Math.abs((next.size||0) - top) < 0.6 && usable.includes(next) && !/\d/.test(next.text) && next.text.length <= 40) title += ' ' + next.text.trim();
+  title = title.replace(/\s+/g, ' ').replace(/[\s:|\-]+$/, '');
+  if(title.length < 2) return null;
+  if(title === title.toUpperCase() && /[A-Z]{3}/.test(title)) title = title.toLowerCase().replace(/(^|[\s\-(/])([a-z])/g, (m,a,b) => a + b.toUpperCase());
+  return title;
+}
+function patternDesignerFromText(text){
+  // Keywords match any case; the name itself must be Capitalized (no 'i' flag).
+  const ci = w => w.replace(/[a-z]/g, c => `[${c}${c.toUpperCase()}]`);
+  const NAME = "([A-Z][\\w'.\\-]*(?:[ \\t]+(?:[A-Z][\\w'.\\-]*|de|van|von|der|la|le|du|di)){0,4})";
+  const tries = [
+    new RegExp(`(?:${ci('designed')}|${ci('design')}|${ci('pattern')}|${ci('written')})\\s+${ci('by')}\\s*:?\\s*` + NAME),
+    new RegExp(`${ci('designer')}\\s*:\\s*` + NAME),
+    new RegExp(`(?:©|\\([cC]\\)|${ci('copyright')})\\s*(?:\\d{4}(?:\\s*-\\s*\\d{4})?\\s*,?\\s*)?(?:${ci('by')}\\s+)?` + NAME),
+    new RegExp(`^\\s*${ci('by')}\\s+` + NAME + '\\s*$', 'm')
+  ];
+  for(const re of tries){
+    const m = text.match(re);
+    if(!m) continue;
+    let name = m[1].replace(/\s+(?:All|ALL|Rights|Reserved|Designs?|DESIGNS?|Pattern|For|Photos?|Photography|Yarn|Published|Ltd|Inc|LLC)\b.*$/,'').replace(/[.,\s]+$/,'').trim();
+    if(name.length < 2 || /^(?:The|This|All|Copyright|Gauge|Yarn|Using|Size)$/i.test(name)) continue;
+    if(name === name.toUpperCase()) name = name.toLowerCase().replace(/(^|[\s\-'])([a-z])/g, (x,a,b) => a + b.toUpperCase());
+    return name;
+  }
+  return null;
+}
+function patternCraftFromText(flat){
+  const count = re => (flat.match(re) || []).length;
+  const crochet = count(/\b(?:sc|hdc|dc|tr|sl st|ch-?\d*|ch-sp|sc2tog|dc2tog|crochet(?:ed)?|hook)\b/gi);
+  const knit = count(/\b(?:k|p)\d+\b|\b(?:k2tog|p2tog|ssk|ssp|kfb|m1[lr]?|knit(?:ting|wise)?|purl(?:wise)?|(?<!(?:tapestry|yarn|darning|sewing|blunt) )needles?|cast on|bind off|co|bo|pm|sm|st st|stockinette|garter)\b/gi);
+  if(crochet >= 3 && crochet >= knit * 2) return 'crochet';
+  if(knit >= 3 && knit >= crochet * 2) return 'knit';
+  return null;
+}
+function patternGaugeFromText(flat){
+  const re = /\b(?:gauge|tension)\b/gi;
+  let m;
+  while((m = re.exec(flat))){
+    const win = flat.slice(m.index, m.index + 220);
+    const sts = win.match(/(\d{1,2}(?:\.\d+)?)\s*(?:sts|stitches|st|sc|hdc|dc|tr|v-?sts)\b/i);
+    const rows = win.match(/(\d{1,2}(?:\.\d+)?)\s*(?:rows|rnds|rounds|r)\b/i);
+    if(!sts && !rows) continue;
+    // The square it's measured over: 4"/10 cm normally, scaled if given over e.g. 2".
+    const over = win.match(/(\d{1,2}(?:\.\d+)?)\s*(?:"|''|in(?:ch(?:es)?)?\b\.?|cm\b)/i);
+    let unit = 'in', k = 1;
+    if(over){
+      const size = Number(over[1]);
+      const isCm = /cm/i.test(over[0]) && !/\d\s*(?:"|''|in)/i.test(win.slice(0, over.index));
+      unit = isCm ? 'cm' : 'in';
+      if(size > 0) k = (isCm ? 10 : 4) / size;
+    }
+    const fix = v => v == null ? null : Math.round(Number(v) * k * 10) / 10;
+    const s = sts ? fix(sts[1]) : null, r = rows ? fix(rows[1]) : null;
+    if((s == null || (s >= 4 && s <= 60)) && (r == null || (r >= 4 && r <= 90))) return { sts: s, rows: r, unit };
+  }
+  return null;
+}
+function patternNeedleFromText(flat){
+  const re = /\b(?:needles?|hook|dpns?|circulars?|crochet hook)\b/gi;
+  const sizes = [];
+  let m;
+  while((m = re.exec(flat))){
+    const start = Math.max(0, m.index - 70);
+    const win = flat.slice(start, m.index + 110);
+    const mmRe = /(\d{1,2}(?:[.,]\d{1,2})?)\s*mm\b/gi;
+    let mm, any = false;
+    while((mm = mmRe.exec(win))){
+      const v = Number(mm[1].replace(',', '.'));
+      if(v < 1.5 || v > 25) continue;
+      any = true;
+      const near = win.slice(Math.max(0, mm.index - 22), mm.index + mm[0].length + 22);
+      const us = near.match(/\bUS\s*(?:size\s*)?#?\s*(\d{1,2}(?:\.\d+)?)\b/i);
+      const letter = near.match(/\b([B-SU])\s*[/-]\s*(\d{1,2}(?:\.\d+)?)\b/);
+      const label = `${v} mm` + (us ? ` / US ${us[1]}` : letter ? ` / ${letter[1]}-${letter[2]}` : '');
+      if(!sizes.some(s => s.mm === v)) sizes.push({ mm: v, label });
+      else if(label.includes('/')){ const s = sizes.find(s => s.mm === v); if(!s.label.includes('/')) s.label = label; }
+    }
+    if(!any){
+      const us = win.match(/\bUS\s*(?:size\s*)?#?\s*(\d{1,2}(?:\.\d+)?)\b/i);
+      if(us && !sizes.some(s => s.label === `US ${us[1]}`)) sizes.push({ mm: null, label: `US ${us[1]}` });
+    }
+  }
+  return sizes.length ? sizes.slice(0, 3).map(s => s.label).join(', ') : null;
+}
+/* Yardage needed, in yards. Prefer a stated total ("approx 880 (960, 1040)
+   yds" → the largest size); otherwise per-skein length × skein count. */
+function patternYardageFromText(flat){
+  const NUMS = String.raw`(\d[\d,.]*(?:\s*[([{/,;-]\s*\d[\d,.]*\s*[)\]}]?)*)`;
+  const amountRe = new RegExp(NUMS + String.raw`\s*[)\]}]?\s*(yds?|yards?|m|meters?|metres?)\b\.?`, 'gi');
+  const parseNums = s => s.split(/[\s([{/;)\]}-]+|,\s+|,(?!\d{3}\b)/).map(t => Number(t.replace(/,/g,''))).filter(n => n > 0);
+  const found = [];
+  let m;
+  while((m = amountRe.exec(flat))){
+    const nums = parseNums(m[1]);
+    if(!nums.length) continue;
+    const isYd = /^y/i.test(m[2]);
+    const after = flat.slice(m.index + m[0].length, m.index + m[0].length + 30);
+    const before = flat.slice(Math.max(0, m.index - 45), m.index);
+    const perSkein = /^\s*(?:\/|per|in|=|-)?\s*(?:\d+\s*m\b\.?\s*)?(?:\/|per|in|=|-)?\s*(?:a\s+|each\s+|one\s+)?(?:\d+\s*(?:g|gr|grams?|oz)\b|skein|ball|hank|cake)/i.test(after)
+      || /\d+\s*(?:g|gr|grams?|oz)\s*(?:\/|=|-|\()\s*$/i.test(before);
+    const total = /(?:approx|approximately|about|total|you(?:'ll| will) need|requires?|yardage|amount)\W*(?:\w+\W+){0,3}$/i.test(before);
+    found.push({ nums, isYd, perSkein, total, at: m.index });
+  }
+  const toYd = f => Math.round(Math.max(...f.nums) * (f.isYd ? 1 : YD_PER_M));
+  const plausible = y => y >= 15 && y <= 15000;
+  const pick = list => (list.find(f => f.isYd) || list[0]);
+  const totals = found.filter(f => !f.perSkein && f.total);
+  if(totals.length){ const y = toYd(pick(totals)); if(plausible(y)) return y; }
+  const skein = pick(found.filter(f => f.perSkein));
+  if(skein){
+    const per = skein.isYd ? Math.max(...skein.nums) : Math.max(...skein.nums) * YD_PER_M;
+    const countRe = new RegExp(NUMS + String.raw`\s*[)\]}]?\s*(?:skeins?|balls?|hanks?|cakes?)\b`, 'gi');
+    let c, best = 0;
+    while((c = countRe.exec(flat))){
+      const n = Math.max(...parseNums(c[1]));
+      if(n >= 1 && n <= 40) best = Math.max(best, n);
+    }
+    const byWeight = /\b(\d{1,2})\s*[x×]\s*\d+\s*(?:g|gr|grams?|oz)\b/gi;   // "2 x 50g balls"
+    while((c = byWeight.exec(flat))) best = Math.max(best, Number(c[1]));
+    if(best){ const y = Math.round(per * best); if(plausible(y)) return y; }
+  }
+  const rest = found.filter(f => !f.perSkein);
+  if(rest.length){ const y = toYd(pick(rest)); if(plausible(y)) return y; }
+  return null;
+}
+function patternWeightFromText(flat){
+  const rules = [
+    ['Super Bulky', /\bsuper[\s-]*(?:bulky|chunky)\b|\bjumbo\b|\broving\b/gi],
+    ['Bulky', /\b(?<!super[\s-]*)(?:bulky|chunky)\b|\b(?:12|14)[\s-]*ply\b/gi],
+    ['Worsted', /\b(?<!light[\s-]*)worsted\b|\baran\b|\b10[\s-]*ply\b/gi],
+    ['DK', /\bdk\b|\bdouble knit(?:ting)?\b|\blight[\s-]*worsted\b|\b8[\s-]*ply\b/gi],
+    ['Sport', /\bsport(?:[\s-]*weight)?\b|\b5[\s-]*ply\b/gi],
+    ['Fingering', /\bfingering\b|\bsock[\s-]*(?:weight|yarn)\b|\b(?:3|4)[\s-]*ply\b/gi],
+    ['Lace', /\blace[\s-]*weight\b|\b(?:lace|cobweb)[\s-]*yarn\b|\b(?:1|2)[\s-]*ply\b/gi]
+  ];
+  const CYC = ['Lace','Fingering','Sport','DK','Worsted','Bulky','Super Bulky','Super Bulky'];
+  const scores = {};
+  let firstAt = {};
+  for(const [w, re] of rules){
+    let m;
+    while((m = re.exec(flat))){ scores[w] = (scores[w]||0) + 1; if(firstAt[w] == null) firstAt[w] = m.index; }
+  }
+  const cyc = flat.match(/\b(?:cyc|weight|category)\s*#?\s*\(?([0-7])\)?(?!\s*(?:mm|g|oz|ply|sts|rows|"|in|cm))/i) || flat.match(/#([0-7])\s*-?\s*(?:lace|super fine|fine|light|medium|bulky|super bulky|jumbo)\b/i);
+  if(cyc){ const w = CYC[Number(cyc[1])]; scores[w] = (scores[w]||0) + 2; if(firstAt[w] == null) firstAt[w] = cyc.index; }
+  const ranked = Object.keys(scores).sort((a,b) => (scores[b] - scores[a]) || (firstAt[a] - firstAt[b]));
+  return ranked[0] || null;
+}
+function patternSkillFromText(text){
+  const map = { 'beginner':'Beginner', 'basic':'Beginner', 'easy':'Easy', 'advanced beginner':'Easy', 'adventurous beginner':'Easy',
+    'intermediate':'Intermediate', 'experienced':'Experienced', 'advanced':'Experienced', 'expert':'Experienced' };
+  const WORD = '(advanced beginner|adventurous beginner|beginner|basic|easy|intermediate|experienced|advanced|expert)';
+  const labelled = text.match(new RegExp('(?:skill(?:\\s*level)?|level|difficulty|experience)\\s*[:\\-]?\\s*' + WORD + '\\b', 'i'))
+    || text.match(new RegExp('^\\s*' + WORD + '\\s*(?:level|pattern)?\\s*$', 'im'));
+  return labelled ? map[labelled[1].toLowerCase()] : null;
+}
+
+/* =================================================================
    Pattern library. Each pattern keeps its details (designer, craft, yarn
    weight, yardage, hook/needle, gauge, skill, tags, status, notes), a
    source link, and any uploaded PDFs/images. Files go to Firebase Storage
@@ -4587,8 +4923,18 @@ function discardPatternDraftFiles(){
 function buildPatternFilesHTML(){
   if(!pendingPatternFiles.length) return '';
   return `<div class="scrap-chips mt-2">${pendingPatternFiles.map((f,i)=>`<span class="scrap-chip">
-    <a href="${esc(f.url)}" target="_blank" rel="noopener" class="pattern-file-link">${/pdf/i.test(f.type||'')?'📄':'🖼️'} ${esc(f.name)}</a>
+    <a href="${esc(f.url)}" target="_blank" rel="noopener" class="pattern-file-link">${patternFilePreview(f) ? `<img class="pattern-file-thumb" src="${esc(patternFilePreview(f))}" alt="" />` : /pdf/i.test(f.type||'')?'📄':'🖼️'} ${esc(f.name)}</a>
     <button type="button" onclick="removePatternFile(${i})" aria-label="Remove file">✕</button></span>`).join('')}</div>`;
+}
+// Image files are their own preview; PDFs get the thumbnail made on upload.
+function patternFilePreview(f){
+  if(!f) return null;
+  if(f.thumbUrl) return f.thumbUrl;
+  return /^image\//i.test(f.type||'') ? f.url : null;
+}
+function patternCoverUrl(pat){
+  for(const f of (pat.files||[])){ const u = patternFilePreview(f); if(u) return u; }
+  return null;
 }
 function refreshPatternFiles(){
   const el = document.getElementById('patf-files');
@@ -4602,7 +4948,7 @@ function onPatternFileDrop(e){
 async function uploadPatternFiles(fileList){
   const files = [...(fileList||[])];
   if(!files.length || !STATE.user) return;
-  const statusEl = document.getElementById('patf-status');
+  const statusEl = document.getElementById('patf-upload-status');
   for(const file of files){
     const isPdf = /pdf/i.test(file.type||'') || /\.pdf$/i.test(file.name||'');
     if(!isPdf && !isAcceptableImageFile(file)){ wgToast(`${file.name}: only PDFs and images can be uploaded.`, 'error'); continue; }
@@ -4615,9 +4961,24 @@ async function uploadPatternFiles(fileList){
       const type = isPdf ? 'application/pdf' : (blob.type || file.type || 'image/jpeg');
       const ext = isPdf ? 'pdf' : (type.split('/')[1] || 'jpg').replace('jpeg','jpg');
       const safe = (file.name||'pattern').replace(/\.[^.]+$/,'').replace(/[^\w\- ]+/g,'').trim().slice(0,60) || 'pattern';
-      const url = await window.FB.uploadPatternFile(STATE.user.uid, STATE.editingPatternId, blob, `${uid().slice(0,8)}-${safe}.${ext}`, type);
-      pendingPatternFiles.push({ url, name: file.name || `${safe}.${ext}`, type, size: blob.size||file.size||0 });
+      // Read the PDF while it uploads; a failed read never blocks the upload.
+      const reading = isPdf ? analyzePatternPdf(file).catch(err => { console.warn('PDF read failed', err); return null; }) : null;
+      const fileId = uid().slice(0,8);
+      const url = await window.FB.uploadPatternFile(STATE.user.uid, STATE.editingPatternId, blob, `${fileId}-${safe}.${ext}`, type);
       pendingPatternUploads.push(url);
+      const entry = { url, name: file.name || `${safe}.${ext}`, type, size: blob.size||file.size||0 };
+      if(reading){
+        if(statusEl) statusEl.textContent = `Reading ${file.name}…`;
+        const res = await reading;
+        if(res && res.thumb){
+          try{
+            entry.thumbUrl = await window.FB.uploadPatternFile(STATE.user.uid, STATE.editingPatternId, res.thumb, `${fileId}-${safe}-preview.jpg`, 'image/jpeg');
+            pendingPatternUploads.push(entry.thumbUrl);
+          }catch(err){ console.warn('PDF preview upload failed', err); }
+        }
+        if(res) applyPdfFindings(res, file.name);
+      }
+      pendingPatternFiles.push(entry);
     }catch(err){
       console.error('Pattern upload failed', err);
       wgToast(`Couldn't upload ${file.name} — try again.`, 'error');
@@ -4626,11 +4987,49 @@ async function uploadPatternFiles(fileList){
   if(statusEl) statusEl.textContent = '';
   refreshPatternFiles();
 }
+/* Fill the form from what was found in a PDF — only fields still empty (craft
+   only if it hasn't been picked), so nothing typed is ever overwritten.
+   Filled fields are tinted until edited, and listed so they get a look. */
+function applyPdfFindings(res, fileName){
+  const f = res.found || {};
+  const filled = [];
+  const field = id => document.getElementById(id);
+  const fill = (id, val, label) => {
+    const el = field(id);
+    if(!el || val == null || val === '' || String(el.value).trim() !== '') return false;
+    el.value = val;
+    el.classList.add('from-pdf');
+    el.addEventListener('input', () => el.classList.remove('from-pdf'), { once:true });
+    el.addEventListener('change', () => el.classList.remove('from-pdf'), { once:true });
+    if(label) filled.push(label);
+    return true;
+  };
+  fill('patf-name', f.name, 'name');
+  fill('patf-designer', f.designer, 'designer');
+  const craft = field('patf-craft');
+  if(f.craft && craft && !craft.dataset.touched && craft.value !== f.craft){
+    craft.value = f.craft; craft.dataset.touched = '1'; craft.classList.add('from-pdf'); filled.push('craft');
+  }
+  fill('patf-weight', f.weightCategory, 'yarn weight');
+  fill('patf-yardage', f.yardage ? toDisplayLength(f.yardage) : null, 'yardage');
+  fill('patf-needle', f.needleSize, 'hook/needle');
+  fill('patf-skill', f.skillLevel, 'skill level');
+  if(f.gauge && field('patf-gauge-sts') && !field('patf-gauge-sts').value && !field('patf-gauge-rows').value){
+    const a = fill('patf-gauge-sts', f.gauge.sts), b = fill('patf-gauge-rows', f.gauge.rows);
+    if(a || b){ field('patf-gauge-unit').value = f.gauge.unit === 'cm' ? 'cm' : 'in'; filled.push('gauge'); }
+  }
+  const note = field('patf-pdf-note');
+  if(!note) return;
+  if(filled.length) note.textContent = `Filled in from ${fileName}: ${filled.join(', ')} — give them a quick check.`;
+  else if(!res.hasText) note.textContent = `${fileName} looks scanned (no text inside), so only a preview was made — add the details by hand.`;
+  else note.textContent = `Nothing new to fill in from ${fileName}.`;
+}
 function removePatternFile(i){
   const f = pendingPatternFiles[i];
   if(!f) return;
   pendingPatternFiles.splice(i,1);
   pendingPatternRemovals.push(f.url);
+  if(f.thumbUrl) pendingPatternRemovals.push(f.thumbUrl);
   refreshPatternFiles();
 }
 function renderPatternForm(){
@@ -4646,18 +5045,19 @@ function renderPatternForm(){
       <input id="patf-designer" value="${v('designer')}" />
     </label>
     <label class="field">Craft
-      <select id="patf-craft">${[['knit','Knit'],['crochet','Crochet'],['other','Other']].map(([k,l])=>`<option value="${k}" ${(editing?editing.craft:'knit')===k?'selected':''}>${l}</option>`).join('')}</select>
+      <select id="patf-craft" onchange="this.dataset.touched='1'">${[['knit','Knit'],['crochet','Crochet'],['other','Other']].map(([k,l])=>`<option value="${k}" ${(editing?editing.craft:'knit')===k?'selected':''}>${l}</option>`).join('')}</select>
     </label>
     <label class="field">Status
       <select id="patf-status">${PATTERN_STATUSES.map(([k,l])=>`<option value="${k}" ${(editing?editing.status:'saved')===k?'selected':''}>${l}</option>`).join('')}</select>
     </label>
     <div class="field span2">
-      <span class="note field-label">Pattern files (PDFs or images, up to 20 MB each — private to you)</span>
+      <span class="note field-label">Pattern files (PDFs or images, up to 20 MB each — private to you). Adding a PDF makes a preview and fills in any empty details it can find.</span>
       <label class="photo-dropzone" style="max-width:none;" ondragover="event.preventDefault(); this.classList.add('dragover');" ondragleave="this.classList.remove('dragover');" ondrop="onPatternFileDrop(event)">
         <span class="note">${ICONS.upload} Drop files here or tap to choose</span>
         <input type="file" accept="application/pdf,.pdf,image/*,.heic,.heif" multiple style="display:none;" onchange="uploadPatternFiles(this.files); this.value='';" />
       </label>
-      <span id="patf-status" class="note" style="font-size:0.75rem;"></span>
+      <span id="patf-upload-status" class="note" style="font-size:0.75rem;"></span>
+      <span id="patf-pdf-note" class="note" style="font-size:0.75rem; display:block;" aria-live="polite"></span>
       <div id="patf-files">${buildPatternFilesHTML()}</div>
     </div>
     <label class="field span2">Source link (optional)
@@ -4714,7 +5114,7 @@ function handleSavePattern(e){
     name,
     designer: document.getElementById('patf-designer').value.trim() || null,
     craft: document.getElementById('patf-craft').value,
-    status: document.getElementById('patf-status').value,
+    status: document.getElementById('patf-status').value || 'saved',
     sourceUrl: document.getElementById('patf-url').value.trim() || null,
     weightCategory: document.getElementById('patf-weight').value || null,
     yardage: yd==='' ? null : Math.round(fromInputLength(yd)),
@@ -4744,7 +5144,7 @@ async function deletePattern(id){
   const pat = STATE.patterns.find(p=>p.id===id);
   if(!pat) return;
   if(!(await wgConfirm(`Delete "${pat.name}" and its uploaded files? This cannot be undone.`, {title:'Delete pattern', okLabel:'Delete', danger:true}))) return;
-  (pat.files||[]).forEach(f => window.FB.deletePhoto(f.url));
+  (pat.files||[]).forEach(f => { window.FB.deletePhoto(f.url); if(f.thumbUrl) window.FB.deletePhoto(f.thumbUrl); });
   STATE.patterns = STATE.patterns.filter(p=>p.id!==id);
   STATE.projects = STATE.projects.map(p => p.patternId===id ? { ...p, patternId:null } : p);
   persist();
@@ -4825,7 +5225,10 @@ function renderPatternCard(pat){
     pat.skillLevel
   ].filter(Boolean);
   const projects = STATE.projects.filter(p=>p.patternId===pat.id);
+  const cover = patternCoverUrl(pat);
+  const coverFile = cover && (pat.files||[]).find(f=>patternFilePreview(f)===cover);
   return `<div class="card pattern-card">
+    ${cover ? `<a class="pattern-cover" href="${esc(coverFile.url)}" target="_blank" rel="noopener" aria-label="Open ${esc(coverFile.name)}"><img src="${esc(cover)}" alt="" loading="lazy" /></a>` : ''}
     <div class="row-between" style="align-items:flex-start;">
       <div class="grow">
         <p class="project-name" style="font-family:'Fraunces',serif; font-weight:600; font-size:1rem;">${esc(pat.name)}</p>
@@ -4838,7 +5241,9 @@ function renderPatternCard(pat){
     ${meta.length ? `<p class="note" style="margin:6px 0 0;">${meta.map(esc).join(' · ')}</p>` : ''}
     ${(pat.tags||[]).length ? `<div class="scrap-chips mt-1">${pat.tags.map(t=>`<button type="button" class="pattern-tag" onclick="setPatternSearch(${esc(JSON.stringify(t))}, true)">#${esc(t)}</button>`).join('')}</div>` : ''}
     ${(pat.files||[]).length || pat.sourceUrl ? `<div class="link-strip">
-      ${(pat.files||[]).map(f=>`<a class="link-card generic" href="${esc(f.url)}" target="_blank" rel="noopener">${/pdf/i.test(f.type||'')?'📄':'🖼️'}<span class="link-title">${esc(f.name)}</span></a>`).join('')}
+      ${(pat.files||[]).map(f=>patternFilePreview(f)
+        ? `<a class="link-card" href="${esc(f.url)}" target="_blank" rel="noopener"><img src="${esc(patternFilePreview(f))}" alt="" loading="lazy" /><span class="link-title">${esc(f.name)}</span></a>`
+        : `<a class="link-card generic" href="${esc(f.url)}" target="_blank" rel="noopener">${/pdf/i.test(f.type||'')?'📄':'🖼️'}<span class="link-title">${esc(f.name)}</span></a>`).join('')}
       ${pat.sourceUrl ? `<a class="link-card generic" href="${esc(pat.sourceUrl)}" target="_blank" rel="noopener">${ICONS.link}<span class="link-title">${esc(linkHostname(pat.sourceUrl))}</span></a>` : ''}
     </div>` : ''}
     ${pat.notes ? renderProjectNotes(pat.notes) : ''}

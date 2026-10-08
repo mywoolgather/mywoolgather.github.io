@@ -1,6 +1,8 @@
 # Woolgather — notes for Claude
 
 ## Commits
+- Work on a branch named `feature/<short-description>` (or `fix/<short-description>`), never the
+  auto-generated `claude/<random-name>` branch a session starts on — rename it before the first push.
 - Author every commit as **Mikayla Norton <miknorton19@gmail.com>**. At the start of a
   session run: `git config user.name "Mikayla Norton" && git config user.email "miknorton19@gmail.com"`
 - Do NOT add `Co-Authored-By`, `Claude-Session`, or any other Claude attribution lines to
