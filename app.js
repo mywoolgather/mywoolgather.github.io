@@ -2706,9 +2706,11 @@ function renderProjectForm(){
     <label class="field">Project name
       <input id="pf-name" required placeholder="Gift cowl for Dana" value="${v('name')}" />
     </label>
-    <label class="field">Pattern (optional)
-      <input id="pf-pattern" value="${v('patternName')}" />
-    </label>
+    <div class="field pf-pattern-field">
+      <label for="pf-pattern">Pattern (optional)</label>
+      ${buildProjectPatternPicker()}
+      <input id="pf-pattern" value="${v('patternName')}" placeholder="${STATE.patterns.length ? 'Or type a pattern name' : ''}" />
+    </div>
     <label class="field">Hook / needle size (optional)
       <input id="pf-needlesize" placeholder="e.g. 4.5 mm / US 7" value="${v('needleSize')}" />
     </label>
@@ -5237,22 +5239,66 @@ function renderPatternStashLine(pat){
   if(m.best) return `<p class="note pattern-stash no-margin">🧶 No single ${esc(pat.weightCategory)} yarn has ${toDisplayLength(pat.yardage)} ${unitLabel()} — most is ${esc(yarnDisplayName(m.best))} (${toDisplayLength(m.best.yardageRemaining)} ${unitLabel()})</p>`;
   return `<p class="note pattern-stash no-margin">🧶 No ${esc(pat.weightCategory)} yarn in your stash yet</p>`;
 }
-/* Start a project from a pattern: open the project form pre-filled with the
-   pattern's name, hook/needle and gauge, linked back to the pattern. */
+/* Start a project from a pattern: open the project form with that pattern
+   picked from the library (see pickProjectPattern). */
 function startProjectFromPattern(id){
   const pat = STATE.patterns.find(p=>p.id===id);
   if(!pat) return;
   cleanupOpenForms();
   STATE.tab = 'projects';
   showProjectForm();
-  pendingProjectPatternId = pat.id;
-  if(pat.sourceUrl) pendingProjectLinks = [{ id: uid(), url: pat.sourceUrl, type:'link', title: pat.name, thumbnail:null }];
   render();
-  const set = (elId, val) => { const el = document.getElementById(elId); if(el && val!=null) el.value = val; };
-  set('pf-name', pat.name);
-  set('pf-pattern', pat.name);
-  set('pf-needlesize', pat.needleSize);
-  if(pat.gauge){ set('pf-gauge-sts', pat.gauge.sts); set('pf-gauge-rows', pat.gauge.rows); set('pf-gauge-unit', pat.gauge.unit||'in'); }
+  const pick = document.getElementById('pf-pattern-pick');
+  if(pick) pick.value = pat.id;
+  pickProjectPattern(pat.id);
+}
+/* Project form: choose the pattern from the library, grouped by pattern
+   status (queued first, since that's what you're likely starting). */
+function buildProjectPatternPicker(){
+  if(!STATE.patterns.length) return '';
+  const groups = [['queued','In my queue'],['saved','Saved'],['made','Made it']];
+  const byName = (a,b) => a.name.localeCompare(b.name);
+  const opt = p => `<option value="${p.id}" ${pendingProjectPatternId===p.id?'selected':''}>${esc(p.name)}${p.designer ? ` — ${esc(p.designer)}` : ''}</option>`;
+  return `<select id="pf-pattern-pick" onchange="pickProjectPattern(this.value)" aria-label="Choose from my patterns">
+    <option value="">Choose from my patterns…</option>
+    ${groups.map(([k,l]) => {
+      const list = STATE.patterns.filter(p => (p.status||'saved')===k).sort(byName);
+      return list.length ? `<optgroup label="${l}">${list.map(opt).join('')}</optgroup>` : '';
+    }).join('')}
+  </select>`;
+}
+/* Link the project to a library pattern and fill in what it knows: the
+   pattern name, plus project name, hook/needle and gauge where those are
+   still empty — nothing typed is overwritten. The pattern's source link is
+   added too. Switching patterns swaps out what the previous pick filled. */
+function pickProjectPattern(id){
+  const el = elId => document.getElementById(elId);
+  const prev = STATE.patterns.find(p=>p.id===pendingProjectPatternId);
+  const pat = STATE.patterns.find(p=>p.id===id) || null;
+  pendingProjectPatternId = pat ? pat.id : null;
+  if(prev){
+    pendingProjectLinks = pendingProjectLinks.filter(l => l.fromPattern !== prev.id);
+    ['pf-pattern','pf-name'].forEach(f => { if(el(f) && el(f).value.trim() === prev.name) el(f).value = ''; });
+    if(el('pf-needlesize') && prev.needleSize && el('pf-needlesize').value.trim() === prev.needleSize) el('pf-needlesize').value = '';
+    const g = prev.gauge;
+    if(g && el('pf-gauge-sts') && el('pf-gauge-sts').value === String(g.sts ?? '') && el('pf-gauge-rows').value === String(g.rows ?? '')){
+      el('pf-gauge-sts').value = ''; el('pf-gauge-rows').value = '';
+    }
+  }
+  if(pat){
+    const fillIfEmpty = (f, val) => { const e = el(f); if(e && val != null && val !== '' && !String(e.value).trim()) e.value = val; };
+    if(el('pf-pattern')) el('pf-pattern').value = pat.name;
+    fillIfEmpty('pf-name', pat.name);
+    fillIfEmpty('pf-needlesize', pat.needleSize);
+    if(pat.gauge && el('pf-gauge-sts') && !el('pf-gauge-sts').value && !el('pf-gauge-rows').value){
+      fillIfEmpty('pf-gauge-sts', pat.gauge.sts);
+      fillIfEmpty('pf-gauge-rows', pat.gauge.rows);
+      el('pf-gauge-unit').value = pat.gauge.unit === 'cm' ? 'cm' : 'in';
+    }
+    if(pat.sourceUrl && !pendingProjectLinks.some(l => l.url === pat.sourceUrl))
+      pendingProjectLinks.push({ id: uid(), url: pat.sourceUrl, type:'link', title: pat.name, thumbnail:null, fromPattern: pat.id });
+  }
+  renderLinkPreviews();
 }
 /* Load the pattern's gauge into the calculator as the target to compare to. */
 function patternToGauge(id){
