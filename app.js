@@ -1352,6 +1352,7 @@ function renderTab(){
   else if(STATE.tab==='shopping') el.innerHTML = renderShopping();
   else if(STATE.tab==='gauge') el.innerHTML = renderGauge();
   else if(STATE.tab==='presets') el.innerHTML = renderPresetsAdmin();
+  if(STATE.tab==='patterns') refreshPatternPdfReads();
 
   if(STATE.tab==='overview') renderCharts();
   syncFormScrollLock();
@@ -2370,6 +2371,7 @@ function cleanupOpenForms(){
   STATE.editingProjectId = null;
   STATE.editingPatternId = null;
   pendingProjectPatternId = null;
+  pendingProjectPatternSize = null;
   pendingProjectYarnUsage = [];
   pendingProjectYarnRequired = [];
   pendingProjectPhotos = [];
@@ -2388,6 +2390,7 @@ function showProjectForm(id){
   pendingProjectPhotos = editing ? [...(editing.photos||[])] : [];
   pendingProjectCounters = editing ? (editing.counters||[]).map(c=>({...c})) : [];
   pendingProjectPatternId = editing ? (editing.patternId||null) : null;
+  pendingProjectPatternSize = editing ? (editing.patternSize||null) : null;
   renderTab();
 }
 function hideProjectForm(){ cleanupOpenForms(); renderTab(); }
@@ -2710,6 +2713,7 @@ function renderProjectForm(){
       <label for="pf-pattern">Pattern (optional)</label>
       ${buildProjectPatternPicker()}
       <input id="pf-pattern" value="${v('patternName')}" placeholder="${STATE.patterns.length ? 'Or type a pattern name' : ''}" />
+      <div id="pf-pattern-size">${buildProjectPatternSizeHTML()}</div>
     </div>
     <label class="field">Hook / needle size (optional)
       <input id="pf-needlesize" placeholder="e.g. 4.5 mm / US 7" value="${v('needleSize')}" />
@@ -2876,12 +2880,21 @@ function handleSaveProject(e){
   const existing = STATE.projects.find(p=>p.id===STATE.editingProjectId);
   const sizeSelect = document.getElementById('pf-garment-size').value;
   const garmentSize = sizeSelect === '__custom__' ? document.getElementById('pf-garment-size-custom').value.trim() : sizeSelect;
+  // Making a pattern in a given size with one yarn: that size's yardage
+  // becomes the yarn's "need", unless one is already set.
+  const sizePat = STATE.patterns.find(p=>p.id===pendingProjectPatternId);
+  const sizeRow = sizePat && (sizePat.sizes||[]).find(x=>x.label===pendingProjectPatternSize);
+  if(sizeRow && pendingProjectYarnIds.length===1 && !pendingProjectYarnRequired.some(u=>u.yarnId===pendingProjectYarnIds[0] && Number(u.yardage) > 0)){
+    pendingProjectYarnRequired = pendingProjectYarnRequired.filter(u=>u.yarnId!==pendingProjectYarnIds[0]);
+    pendingProjectYarnRequired.push({ yarnId: pendingProjectYarnIds[0], yardage: sizeRow.yardage });
+  }
   const fields = {
     name,
     patternName: document.getElementById('pf-pattern').value.trim(),
     needleSize: document.getElementById('pf-needlesize').value.trim() || null,
     notes: document.getElementById('pf-notes').value.trim() || null,
     patternId: pendingProjectPatternId || null,
+    patternSize: pendingProjectPatternId ? (pendingProjectPatternSize || null) : null,
     gauge: (()=>{
       const s = document.getElementById('pf-gauge-sts').value;
       const r = document.getElementById('pf-gauge-rows').value;
@@ -2986,7 +2999,7 @@ function renderProjectRow(p){
   return `<div class="project-row">
     <span class="status-dot" style="background:${STATUS_COLORS[p.status]}"></span>
     <div class="grow">
-      <p class="project-name">${esc(p.name)}${p.patternName ? ` <span class="pattern">— ${p.patternId && STATE.patterns.some(pt=>pt.id===p.patternId) ? `<button type="button" class="pattern-inline-link" onclick="openPatternInLibrary('${p.patternId}')" title="Open in pattern library">${ICONS.book} ${esc(p.patternName)}</button>` : esc(p.patternName)}</span>` : ''}</p>
+      <p class="project-name">${esc(p.name)}${p.patternName ? ` <span class="pattern">— ${p.patternId && STATE.patterns.some(pt=>pt.id===p.patternId) ? `<button type="button" class="pattern-inline-link" onclick="openPatternInLibrary('${p.patternId}')" title="Open in pattern library">${ICONS.book} ${esc(p.patternName)}</button>` : esc(p.patternName)}${p.patternSize ? ` · size ${esc(p.patternSize)}` : ''}</span>` : ''}</p>
       <div class="project-meta">
         ${usedYarns.map(y=>`<span class="dot" style="background:${y.colorHex}" title="${esc(y.name)}"></span>`).join('')}
         ${garmentBadge ? `<span class="note">${esc(garmentBadge)}</span>` : ''}
@@ -4577,9 +4590,12 @@ function commitOrderImport(){
       text layer get a preview only — there's no OCR here.
 ================================================================= */
 const PDFJS_BASE = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/';
-const PDF_TEXT_PAGES = 5;     // gauge/materials are almost always up front
+const PDF_TEXT_PAGES = 8;     // materials can follow a contents page, terms and notes
 const PDF_IMAGE_PAGES = 3;
-const PDF_MAX_PREVIEWS = 5;   // photos + page 1 offered as cover choices
+const PDF_MAX_PREVIEWS = 5;
+// Bump when parsePatternText learns something new: PDFs read by an older
+// version are re-read once in the background (refreshPatternPdfReads).
+const PDF_PARSER_VERSION = 2;   // photos + page 1 offered as cover choices
 const PDF_THUMB_MAX = 800;    // px, longest side of the stored preview
 let pdfjsPromise = null;
 function loadPdfJs(){
@@ -4591,16 +4607,17 @@ function loadPdfJs(){
   }
   return pdfjsPromise;
 }
-async function analyzePatternPdf(file){
+async function analyzePatternPdf(file, opts = {}){
+  const wantPreviews = opts.previews !== false;
   const lib = await loadPdfJs();
   const doc = await lib.getDocument({ data: new Uint8Array(await file.arrayBuffer()), isEvalSupported:false }).promise;
   try{
     const lines = [];
     const found = [];
-    for(let n = 1; n <= Math.min(doc.numPages, Math.max(PDF_TEXT_PAGES, PDF_IMAGE_PAGES)); n++){
+    for(let n = 1; n <= Math.min(doc.numPages, wantPreviews ? Math.max(PDF_TEXT_PAGES, PDF_IMAGE_PAGES) : PDF_TEXT_PAGES); n++){
       const page = await doc.getPage(n);
       if(n <= PDF_TEXT_PAGES) lines.push(...pdfTextLines(await page.getTextContent(), n));
-      if(n <= PDF_IMAGE_PAGES){
+      if(wantPreviews && n <= PDF_IMAGE_PAGES){
         const imgs = await pdfPageImages(page, lib.OPS).catch(() => []);
         // Page 1 gets a head start: the cover photo beats a bigger step photo later on.
         imgs.forEach(im => { if(!found.some(f => f.id === im.id)) found.push({ ...im, score: im.score * (n===1 ? 1.5 : 1) }); });
@@ -4614,7 +4631,7 @@ async function analyzePatternPdf(file){
       const blob = await pdfImageToJpeg(f.img).catch(() => null);
       if(blob) thumbs.push(blob);
     }
-    const pageOne = await renderPdfPageToJpeg(await doc.getPage(1)).catch(() => null);
+    const pageOne = wantPreviews ? await renderPdfPageToJpeg(await doc.getPage(1)).catch(() => null) : null;
     if(pageOne) thumbs.push(pageOne);
     return { thumbs, hasText: lines.some(l => /[a-z]{3}/i.test(l.text)), found: parsePatternText(lines) };
   } finally {
@@ -4624,21 +4641,37 @@ async function analyzePatternPdf(file){
 /* Text items → visual lines (same baseline), keeping font size so the title
    can be picked out as the biggest text on page 1. */
 function pdfTextLines(content, pageNum){
-  const items = content.items.filter(it => it.str && it.str.trim())
+  const raw = content.items.filter(it => it.str && it.str.trim())
     .map(it => ({ str: it.str, x: it.transform[4], y: it.transform[5], w: it.width||0, size: Math.hypot(it.transform[2], it.transform[3]) || it.height || 10 }));
-  items.sort((a,b) => (b.y - a.y) || (a.x - b.x));
-  const lines = [];
-  let cur = null;
+  // Display fonts often draw the same word twice (fill + outline/shadow) —
+  // keep one, or "LACEY" reads as "LACEYLACEY".
+  const items = raw.filter((it, i) => !raw.slice(0, i).some(o => o.str === it.str && Math.abs(o.x - it.x) < it.size*0.4 && Math.abs(o.y - it.y) < it.size*0.4));
+  items.sort((a,b) => b.y - a.y);
+  // Group into rows by baseline, then read each row left to right.
+  const rows = [];
   for(const it of items){
-    if(cur && Math.abs(it.y - cur.y) <= Math.max(cur.size, it.size) * 0.5){
-      const gap = it.x - cur.endX;
-      const needSpace = !/\s$/.test(cur.text) && !/^\s/.test(it.str) && gap > Math.min(cur.size, it.size) * 0.15;
-      cur.text += (needSpace ? ' ' : '') + it.str;
-      cur.endX = it.x + it.w;
-      cur.size = Math.max(cur.size, it.size);
-    } else {
-      cur = { text: it.str, y: it.y, endX: it.x + it.w, size: it.size, page: pageNum };
-      lines.push(cur);
+    const row = rows.find(r => Math.abs(it.y - r.y) <= Math.max(r.size, it.size) * 0.5);
+    if(row){ row.items.push(it); row.size = Math.max(row.size, it.size); }
+    else rows.push({ y: it.y, size: it.size, items: [it] });
+  }
+  rows.sort((a,b) => b.y - a.y);
+  const lines = [];
+  for(const row of rows){
+    row.items.sort((a,b) => a.x - b.x);
+    let cur = null;
+    for(const it of row.items){
+      const gap = cur ? it.x - cur.endX : 0;
+      // A wide gap is a column gutter: start a separate line so two columns
+      // side by side don't run together ("…1,381 yd (1,263 m)Hook: 4 mm").
+      if(cur && gap <= Math.min(cur.size, it.size) * 1.8){
+        const needSpace = !/\s$/.test(cur.text) && !/^\s/.test(it.str) && gap > Math.min(cur.size, it.size) * 0.15;
+        cur.text += (needSpace ? ' ' : '') + it.str;
+        cur.endX = Math.max(cur.endX, it.x + it.w);
+        cur.size = Math.max(cur.size, it.size);
+      } else {
+        cur = { text: it.str, endX: it.x + it.w, size: it.size, page: pageNum };
+        lines.push(cur);
+      }
     }
   }
   return lines.map(l => ({ text: l.text.replace(/\s+/g,' ').trim(), size: Math.round(l.size*10)/10, page: l.page }));
@@ -4741,7 +4774,7 @@ function parsePatternText(lines){
     craft: patternCraftFromText(flat),
     gauge: patternGaugeFromText(flat),
     needleSize: patternNeedleFromText(flat),
-    yardage: patternYardageFromText(flat),
+    ...patternYardageAndSizes(L, flat, text),
     weightCategory: patternWeightFromText(flat),
     skillLevel: patternSkillFromText(text)
   };
@@ -4764,20 +4797,28 @@ function patternTitleFromLines(L){
   return title;
 }
 function patternDesignerFromText(text){
-  // Keywords match any case; the name itself must be Capitalized (no 'i' flag).
+  // Keywords match any case; a name must be Capitalized (no 'i' flag).
   const ci = w => w.replace(/[a-z]/g, c => `[${c}${c.toUpperCase()}]`);
   const NAME = "([A-Z][\\w'.\\-]*(?:[ \\t]+(?:[A-Z][\\w'.\\-]*|de|van|von|der|la|le|du|di)){0,4})";
+  const HANDLE = '@([A-Za-z0-9_.]{3,30})';
+  const BY = `(?:${ci('designed')}|${ci('design')}|${ci('pattern')}|${ci('written')}|${ci('created')}|${ci('owned')})\\s+${ci('by')}\\s*:?\\s*`;
+  // Most specific first; [regex, is a social handle]
   const tries = [
-    new RegExp(`(?:${ci('designed')}|${ci('design')}|${ci('pattern')}|${ci('written')})\\s+${ci('by')}\\s*:?\\s*` + NAME),
-    new RegExp(`${ci('designer')}\\s*:\\s*` + NAME),
-    new RegExp(`(?:©|\\([cC]\\)|${ci('copyright')})\\s*(?:\\d{4}(?:\\s*-\\s*\\d{4})?\\s*,?\\s*)?(?:${ci('by')}\\s+)?` + NAME),
-    new RegExp(`^\\s*${ci('by')}\\s+` + NAME + '\\s*$', 'm')
+    [new RegExp(BY + NAME), false],
+    [new RegExp(BY + HANDLE), true],
+    [new RegExp(`${ci('designer')}\\s*:\\s*` + NAME), false],
+    [new RegExp(`${ci('pattern creator')}\\s*[-:]\\s*` + NAME), false],
+    [new RegExp(`(?:©|\\([cC]\\)|${ci('copyright')})\\s*(?:\\d{4}(?:\\s*-\\s*\\d{4})?\\s*,?\\s*)?(?:${ci('by')}\\s+)?` + NAME), false],
+    [new RegExp(`^\\s*${ci('by')}\\s+` + NAME + '\\s*$', 'm'), false],
+    [new RegExp(HANDLE + `\\s+${ci('on')}\\s+(?:${ci('instagram')}|IG\\b)`), true],
+    [new RegExp(`${ci('tag me')}\\s+(?:${ci('on')}\\s+\\w+\\s+)?` + HANDLE), true]
   ];
-  for(const re of tries){
+  for(const [re, isHandle] of tries){
     const m = text.match(re);
     if(!m) continue;
-    let name = m[1].replace(/\s+(?:All|ALL|Rights|Reserved|Designs?|DESIGNS?|Pattern|For|Photos?|Photography|Yarn|Published|Ltd|Inc|LLC)\b.*$/,'').replace(/[.,\s]+$/,'').trim();
-    if(name.length < 2 || /^(?:The|This|All|Copyright|Gauge|Yarn|Using|Size)$/i.test(name)) continue;
+    if(isHandle) return '@' + m[1].replace(/\.+$/, '');
+    let name = m[1].split(/\.\s/)[0].replace(/\s+(?:All|ALL|Rights|Reserved|Designs?|DESIGNS?|Pattern|For|Photos?|Photography|Yarn|Published|Ltd|Inc|LLC)\b.*$/,'').replace(/[.,\s]+$/,'').trim();
+    if(name.length < 2 || /^(?:The|This|All|Copyright|Gauge|Yarn|Using|Size|You|Your|Me)$/i.test(name)) continue;
     if(name === name.toUpperCase()) name = name.toLowerCase().replace(/(^|[\s\-'])([a-z])/g, (x,a,b) => a + b.toUpperCase());
     return name;
   }
@@ -4792,25 +4833,44 @@ function patternCraftFromText(flat){
   return null;
 }
 function patternGaugeFromText(flat){
+  // Each count needs its measurement close behind it ("18 sts and 24 rows =
+  // 4 in", "5 ROWS = 3.5 cm") — a stray "5 dc" in prose isn't a gauge.
+  const MEAS = /(\d{1,2}(?:\.\d+)?)\s*(?:"|''|in(?:c|ch|ches)?\b\.?|cm\b)/i;
+  const measAfter = (win, at) => {
+    const m = win.slice(at, at + 45).match(MEAS);
+    if(!m) return null;
+    const isCm = /cm/i.test(m[0]);
+    const size = Number(m[1]);
+    return size > 0 ? { unit: isCm ? 'cm' : 'in', k: (isCm ? 10 : 4) / size } : null;
+  };
   const re = /\b(?:gauge|tension)\b/gi;
   let m;
   while((m = re.exec(flat))){
-    const win = flat.slice(m.index, m.index + 220);
-    const sts = win.match(/(\d{1,2}(?:\.\d+)?)\s*(?:sts|stitches|st|sc|hdc|dc|tr|v-?sts)\b/i);
-    const rows = win.match(/(\d{1,2}(?:\.\d+)?)\s*(?:rows|rnds|rounds|r)\b/i);
-    if(!sts && !rows) continue;
-    // The square it's measured over: 4"/10 cm normally, scaled if given over e.g. 2".
-    const over = win.match(/(\d{1,2}(?:\.\d+)?)\s*(?:"|''|in(?:ch(?:es)?)?\b\.?|cm\b)/i);
-    let unit = 'in', k = 1;
-    if(over){
-      const size = Number(over[1]);
-      const isCm = /cm/i.test(over[0]) && !/\d\s*(?:"|''|in)/i.test(win.slice(0, over.index));
-      unit = isCm ? 'cm' : 'in';
-      if(size > 0) k = (isCm ? 10 : 4) / size;
-    }
-    const fix = v => v == null ? null : Math.round(Number(v) * k * 10) / 10;
-    const s = sts ? fix(sts[1]) : null, r = rows ? fix(rows[1]) : null;
-    if((s == null || (s >= 4 && s <= 60)) && (r == null || (r >= 4 && r <= 90))) return { sts: s, rows: r, unit };
+    const win = flat.slice(m.index, m.index + 320);
+    // The first count with its own measurement wins; else the first count.
+    const pickCount = re => {
+      const all = [...win.matchAll(re)];
+      const hit = all.find(h => measAfter(win, h.index + h[0].length)) || all[0] || null;
+      return [hit, hit ? measAfter(win, hit.index + hit[0].length) : null];
+    };
+    const [sts, sm] = pickCount(/(\d{1,2}(?:\.\d+)?)\s*(?:sts|stitches|st|sc|hdc|dc|tr|v-?sts)\b/gi);
+    const [rows, rm] = pickCount(/(\d{1,2}(?:\.\d+)?)\s*(?:rows|rnds|rounds|r)\b/gi);
+    // "Gauge: 4"/10 cm = 18 sts and 24 rows" — the square comes first.
+    const first = [sts, rows].filter(Boolean).sort((a,b) => a.index - b.index)[0];
+    const before = first ? win.slice(Math.max(0, first.index - 30), first.index).match(new RegExp(MEAS.source + String.raw`[^\d]{0,12}$`, 'i')) : null;
+    const shared = before ? { unit: /cm/i.test(before[0]) && !/"|in/i.test(before[0]) ? 'cm' : 'in', k: (/cm/i.test(before[0]) && !/"|in/i.test(before[0]) ? 10 : 4) / Number(before[1]) } : null;
+    if(!sm && !rm && !shared) continue;
+    const unit = (sm || rm || shared).unit;
+    // Each count uses its own measurement (or a shared one stated first);
+    // one in a different unit from the first is dropped.
+    const fix = (hit, meas) => {
+      const ms = meas || shared;
+      if(!hit || !ms || ms.unit !== unit) return null;
+      return Math.round(Number(hit[1]) * ms.k * 10) / 10;
+    };
+    const s = fix(sts, sm), r = fix(rows, rm);
+    if(s == null && r == null) continue;
+    if((s == null || (s >= 4 && s <= 60)) && (r == null || (r >= 2 && r <= 90))) return { sts: s, rows: r, unit };
   }
   return null;
 }
@@ -4826,10 +4886,12 @@ function patternNeedleFromText(flat){
     while((mm = mmRe.exec(win))){
       const v = Number(mm[1].replace(',', '.'));
       if(v < 1.5 || v > 25) continue;
+      if(/^\s*(?:larger|smaller|bigger|up|down|more|less)\b/i.test(win.slice(mm.index + mm[0].length))) continue;
+      if(/\d\s*-\s*$/.test(win.slice(Math.max(0, mm.index - 3), mm.index))) continue;
       any = true;
       const near = win.slice(Math.max(0, mm.index - 22), mm.index + mm[0].length + 22);
       const us = near.match(/\bUS\s*(?:size\s*)?#?\s*(\d{1,2}(?:\.\d+)?)\b/i);
-      const letter = near.match(/\b([B-SU])\s*[/-]\s*(\d{1,2}(?:\.\d+)?)\b/);
+      const letter = near.match(/\b([B-SU])\s*[/-]\s*(\d{1,2}(?:\.\d+)?)(?![\d.])(?!\s*(?:oz|g\b|gr|yd|m\b|%))/);
       const label = `${v} mm` + (us ? ` / US ${us[1]}` : letter ? ` / ${letter[1]}-${letter[2]}` : '');
       if(!sizes.some(s => s.mm === v)) sizes.push({ mm: v, label });
       else if(label.includes('/')){ const s = sizes.find(s => s.mm === v); if(!s.label.includes('/')) s.label = label; }
@@ -4865,6 +4927,8 @@ function patternYardageFromText(flat){
   const pick = list => (list.find(f => f.isYd) || list[0]);
   const totals = found.filter(f => !f.perSkein && f.total);
   if(totals.length){ const y = toYd(pick(totals)); if(plausible(y)) return y; }
+  const byGrams = patternYardageFromGrams(flat);
+  if(byGrams && plausible(byGrams)) return byGrams;
   const skein = pick(found.filter(f => f.perSkein));
   if(skein){
     const per = skein.isYd ? Math.max(...skein.nums) : Math.max(...skein.nums) * YD_PER_M;
@@ -4872,7 +4936,8 @@ function patternYardageFromText(flat){
     let c, best = 0;
     while((c = countRe.exec(flat))){
       const n = Math.max(...parseNums(c[1]));
-      if(n >= 1 && n <= 40) best = Math.max(best, n);
+      // Only a count stated near that yarn's length — not one from another yarn or page.
+      if(n >= 1 && n <= 40 && Math.abs(c.index - skein.at) < 220) best = Math.max(best, n);
     }
     const byWeight = /\b(\d{1,2})\s*[x×]\s*\d+\s*(?:g|gr|grams?|oz)\b/gi;   // "2 x 50g balls"
     while((c = byWeight.exec(flat))) best = Math.max(best, Number(c[1]));
@@ -4881,6 +4946,108 @@ function patternYardageFromText(flat){
   const rest = found.filter(f => !f.perSkein);
   if(rest.length){ const y = toYd(pick(rest)); if(plausible(y)) return y; }
   return null;
+}
+/* "I used approx. 200 g of cotton (200 g/600 m)" — weight used × the yarn's
+   length per weight, summed over each yarn mentioned. Made-to-measure
+   patterns often only give amounts this way. */
+function patternYardageFromGrams(flat){
+  const ratioRe = /(\d+(?:[.,]\d+)?)\s*(g|gr|grams?|oz)\s*\/\s*(\d[\d,]*(?:\.\d+)?)\s*(yds?|yards?|m|meters?|metres?)\b|(\d[\d,]*(?:\.\d+)?)\s*(yds?|yards?|m|meters?|metres?)\s*\/\s*(\d+(?:[.,]\d+)?)\s*(g|gr|grams?|oz)\b/gi;
+  const usedRe = /\b(?:used|use|need|needs|you'll need|you will need|requires?|approx\.?|approximately|about|around|~)\s*(?:approx\.?\s*|about\s*|~\s*)?(\d+(?:[.,]\d+)?)\s*(g|gr|grams?|oz)\b(?!\s*\/)/gi;
+  const ratios = [];
+  let m;
+  while((m = ratioRe.exec(flat))){
+    const w = Number((m[1]||m[7]).replace(',', '.')), wUnit = m[2]||m[8];
+    const len = Number((m[3]||m[5]).replace(/,/g, '')), lUnit = m[4]||m[6];
+    if(!w || !len) continue;
+    const grams = /oz/i.test(wUnit) ? w * 28.35 : w;
+    const yd = /^y/i.test(lUnit) ? len : len * YD_PER_M;
+    ratios.push({ at: m.index, end: m.index + m[0].length, ydPerGram: yd / grams });
+  }
+  if(!ratios.length) return null;
+  let total = 0;
+  const usedRatios = new Set();
+  while((m = usedRe.exec(flat))){
+    const amt = Number(m[1].replace(',', '.'));
+    const grams = /oz/i.test(m[2]) ? amt * 28.35 : amt;
+    if(grams < 5 || grams > 5000) continue;
+    // The yarn's ratio: the nearest one within a couple of sentences.
+    const near = ratios.filter(r => !usedRatios.has(r) && Math.abs(r.at - m.index) < 260)
+      .sort((a,b) => Math.abs(a.at - m.index) - Math.abs(b.at - m.index))[0];
+    if(!near) continue;
+    usedRatios.add(near);
+    total += grams * near.ydPerGram;
+  }
+  return total ? Math.round(total) : null;
+}
+/* Sizes or versions, each with its own yardage ([{label, yardage}], yards),
+   or null. Handles a line per size ("XS – 11 oz / 1,126 yd"), a size list
+   with matching yardage list ("Sizes: XS (S, M)" + "880 (960, 1040) yds"),
+   and versions in prose ("350 yards for the short sleeves, and 700 yards
+   for the long sleeves"). */
+const SIZE_LABEL = String.raw`(?:XXS|XS|XXL|XXXL|XL|[2-6]\s?XL?|[SML]|one size|small|medium|large|x-?large|\d{1,2}\s*-\s*\d{1,2}\s*(?:mo(?:nths?)?|yrs?|years?)|\d{1,2}\s*(?:mo(?:nths?)?|yrs?|years?))`;
+function patternSizesFromText(L, flat, text){
+  const AMT = String.raw`(\d[\d,]*(?:\.\d+)?)\s*(yds?|yards?|m|meters?|metres?)\b`;
+  const toYd = (n, unit) => Math.round(Number(String(n).replace(/,(?=\d{3}\b)/g, '').replace(',', '.')) * (/^y/i.test(unit) ? 1 : YD_PER_M));
+  const clean = l => l.replace(/\s+/g, ' ').replace(/^size\s+/i, '').trim().toUpperCase().replace(/^(\d)\s?X$/, '$1X').replace(/^ONE SIZE$/, 'One size');
+  const ok = list => {
+    const seen = new Set();
+    const out = list.filter(s => s.yardage >= 15 && s.yardage <= 15000 && !seen.has(s.label) && seen.add(s.label));
+    return out.length >= 2 ? out : null;
+  };
+  // 1. A line (or "; "-separated chunk) per size: label, separator, then a length.
+  const rowRe = new RegExp(String.raw`^\s*(?:size\s+)?(${SIZE_LABEL})\s*(?:[-:=|)]|\s)\s*(.{0,40}?)` + AMT, 'i');
+  const rows = [];
+  for(const l of L){
+    for(const chunk of l.text.replace(/[–—]/g, '-').split(/\s*[;|]\s*/)){
+      const m = chunk.match(rowRe);
+      if(!m) continue;
+      // Prefer a yard figure later on the line ("312 g / 1,126 yd (1,030 m)")
+      const yd = chunk.slice(m.index).match(/(\d[\d,]*(?:\.\d+)?)\s*(yds?|yards?)\b/i);
+      rows.push({ label: clean(m[1]), yardage: yd ? toYd(yd[1], 'yd') : toYd(m[3], m[4]) });
+    }
+  }
+  const byRow = ok(rows);
+  if(byRow) return byRow;
+  // 2. "Sizes: XS (S, M, L) [XL, 2XL]" with "880 (960, 1040, 1100) [1200, 1300] yds"
+  const listRe = new RegExp(String.raw`\bsizes?\s*:?\s*((?:${SIZE_LABEL})(?:\s*[(\[{,/]\s*(?:${SIZE_LABEL})\s*[)\]}]?)+)`, 'i');
+  const lm = flat.replace(/[–—]/g, '-').match(listRe);
+  if(lm){
+    const labels = lm[1].split(/\s*[(\[{,/)\]}]+\s*/).filter(Boolean).map(clean);
+    const numsRe = /(\d[\d,.]*(?:\s*[(\[{,/;]\s*\d[\d,.]*\s*[)\]}]?)+)\s*[)\]}]?\s*(yds?|yards?|m|meters?|metres?)\b/gi;
+    const lists = [];
+    let m;
+    while((m = numsRe.exec(flat))){
+      const nums = m[1].split(/[\s(\[{/;)\]}]+|,\s+|,(?!\d{3}\b)/).map(t => t.replace(/,/g, '')).filter(t => +t > 0);
+      if(nums.length === labels.length) lists.push({ nums, unit: m[2], at: m.index });
+    }
+    const yards = lists.filter(x => /^y/i.test(x.unit));
+    const use = yards.length ? yards : lists;
+    if(use.length){
+      // Several colours (MC / CC) each with their own list: add them up per size.
+      const colour = use.filter(x => /\b(?:MC|CC\d?|main colou?r|contrast(?:ing)? colou?r|colou?r\s*[A-Z1-9]|yarn\s*[A-Z1-9])\b[^\d]{0,30}$/i.test(flat.slice(Math.max(0, x.at - 40), x.at)));
+      const chosen = colour.length >= 2 ? colour : [use[0]];
+      const sized = ok(labels.map((label, i) => ({ label, yardage: chosen.reduce((sum, x) => sum + toYd(x.nums[i], x.unit), 0) })));
+      if(sized) return sized;
+    }
+  }
+  // 3. Versions in prose: "<length> … for the <version>"
+  // Line breaks end a version name ("…for the long sleeves⏎Because…").
+  const verRe = new RegExp(AMT + String.raw`[^.;]{0,70}?\bfor (?:the |a |my |your )?([a-z][a-z0-9 -]{2,28}?)(?=[ \t]*(?:[,.;)\n]|\band\b|\bor\b|$))`, 'gi');
+  const versions = [];
+  let v;
+  while((v = verRe.exec(text))){
+    const label = v[3].trim().replace(/\s+(?:version|option|style)$/i, '');
+    if(/^(?:this|the pattern|this pattern|pattern|project|my project|reference|example|sample|swatch|gauge)/i.test(label)) continue;
+    const prev = versions.find(x => x.label.toLowerCase() === label.toLowerCase());
+    if(prev) continue;
+    versions.push({ label: label[0].toUpperCase() + label.slice(1), yardage: toYd(v[1], v[2]) });
+  }
+  return ok(versions);
+}
+function patternYardageAndSizes(L, flat, text){
+  const sizes = patternSizesFromText(L, flat, text || flat);
+  // With sizes, the per-size amounts are the yardage; no single figure.
+  return { sizes, yardage: sizes ? null : patternYardageFromText(flat) };
 }
 function patternWeightFromText(flat){
   const rules = [
@@ -4929,7 +5096,9 @@ let pendingPatternFiles = [];        // files currently on the form ({url,name,t
 let pendingPatternUploads = [];      // URLs uploaded during this form session
 let pendingPatternRemovals = [];     // URLs removed during this form session
 let pendingPatternCover = null;      // chosen cover URL, 'none', or null (= first available)
+let pendingPatternSizes = [];        // [{label, yardage}] — yardage in canonical yards
 let pendingProjectPatternId = null;  // pattern a new project was started from
+let pendingProjectPatternSize = null; // chosen size/version of that pattern (label)
 
 function patternStatusLabel(v){ const s = PATTERN_STATUSES.find(([k])=>k===v); return s ? s[1] : 'Saved'; }
 function showPatternForm(id){
@@ -4941,6 +5110,7 @@ function showPatternForm(id){
   const editing = id ? STATE.patterns.find(p=>p.id===id) : null;
   pendingPatternFiles = editing ? (editing.files||[]).map(f=>({ ...f })) : [];
   pendingPatternCover = editing ? (editing.coverUrl || null) : null;
+  pendingPatternSizes = editing ? (editing.sizes||[]).map(x=>({ ...x })) : [];
   pendingPatternUploads = [];
   pendingPatternRemovals = [];
   render();
@@ -4950,12 +5120,13 @@ function hidePatternForm(){ cleanupOpenForms(); renderTab(); }
 // discarded (they were never saved anywhere).
 function discardPatternDraftFiles(){
   pendingPatternUploads.forEach(url => window.FB.deletePhoto(url));
-  pendingPatternFiles = []; pendingPatternUploads = []; pendingPatternRemovals = []; pendingPatternCover = null;
+  pendingPatternFiles = []; pendingPatternUploads = []; pendingPatternRemovals = []; pendingPatternCover = null; pendingPatternSizes = [];
 }
 function buildPatternFilesHTML(){
   if(!pendingPatternFiles.length) return '';
   return `<div class="scrap-chips mt-2">${pendingPatternFiles.map((f,i)=>`<span class="scrap-chip">
     <a href="${esc(f.url)}" target="_blank" rel="noopener" class="pattern-file-link">${patternFilePreview(f, resolvePatternCover(pendingPatternFiles, pendingPatternCover)) ? `<img class="pattern-file-thumb" src="${esc(patternFilePreview(f, resolvePatternCover(pendingPatternFiles, pendingPatternCover)))}" alt="" />` : /pdf/i.test(f.type||'')?'📄':'🖼️'} ${esc(f.name)}</a>
+    ${/pdf/i.test(f.type||'') ? `<button type="button" onclick="rereadPatternFile(${i})" aria-label="Read details from this PDF again" title="Read details again">↻</button>` : ''}
     <button type="button" onclick="removePatternFile(${i})" aria-label="Remove file">✕</button></span>`).join('')}</div>`;
 }
 // Every image a file offers as a cover: an image file is its own; a PDF has
@@ -5040,7 +5211,7 @@ async function uploadPatternFiles(fileList){
           }catch(err){ console.warn('PDF preview upload failed', err); }
         }
         if(previews.length){ entry.previews = previews; entry.thumbUrl = previews[0]; }
-        if(res) applyPdfFindings(res, file.name);
+        if(res){ entry.parsedVersion = PDF_PARSER_VERSION; applyPdfFindings(res, file.name); }
       }
       pendingPatternFiles.push(entry);
     }catch(err){
@@ -5076,6 +5247,11 @@ function applyPdfFindings(res, fileName){
   }
   fill('patf-weight', f.weightCategory, 'yarn weight');
   fill('patf-yardage', f.yardage ? toDisplayLength(f.yardage) : null, 'yardage');
+  if(f.sizes && f.sizes.length && !pendingPatternSizes.some(x => x.label || x.yardage)){
+    pendingPatternSizes = f.sizes.map(x => ({ ...x }));
+    refreshPatternSizes();
+    filled.push(`yardage for ${f.sizes.length} sizes`);
+  }
   fill('patf-needle', f.needleSize, 'hook/needle');
   fill('patf-skill', f.skillLevel, 'skill level');
   if(f.gauge && field('patf-gauge-sts') && !field('patf-gauge-sts').value && !field('patf-gauge-rows').value){
@@ -5088,12 +5264,100 @@ function applyPdfFindings(res, fileName){
   else if(!res.hasText) note.textContent = `${fileName} looks scanned (no text inside), so only a preview was made — add the details by hand.`;
   else note.textContent = `Nothing new to fill in from ${fileName}.`;
 }
+/* Sizes editor (pattern form). Inputs update state as you type; the list
+   only re-renders when a row is added or removed, so focus isn't lost. */
+function buildPatternSizesHTML(){
+  return `<div class="size-rows">${pendingPatternSizes.map((x,i)=>`<div class="size-row">
+      <input type="text" placeholder="Size" value="${esc(x.label||'')}" oninput="pendingPatternSizes[${i}].label=this.value" aria-label="Size or version name" />
+      <input type="number" min="0" step="any" placeholder="${unitLabel()}" value="${x.yardage ? toDisplayLength(x.yardage) : ''}" oninput="pendingPatternSizes[${i}].yardage=this.value==='' ? null : Math.round(fromInputLength(this.value))" aria-label="Yardage for this size" />
+      <button type="button" class="del-btn" onclick="removePatternSize(${i})" aria-label="Remove size">✕</button>
+    </div>`).join('')}</div>
+    <button type="button" class="btn btn-ghost btn-small mt-1" onclick="addPatternSize()">${ICONS.plus} Add size</button>`;
+}
+function refreshPatternSizes(){ const el = document.getElementById('patf-sizes'); if(el) el.innerHTML = buildPatternSizesHTML(); }
+function addPatternSize(){ pendingPatternSizes.push({ label:'', yardage:null }); refreshPatternSizes(); }
+function removePatternSize(i){ pendingPatternSizes.splice(i,1); refreshPatternSizes(); }
+function cleanPatternSizes(list){
+  return (list||[]).map(x => ({ label: String(x.label||'').trim(), yardage: Number(x.yardage)||null }))
+    .filter(x => x.label && x.yardage > 0);
+}
+/* Re-read one already-uploaded PDF (e.g. after the reading rules improved)
+   and fill whatever is still empty on the form. */
+async function rereadPatternFile(i){
+  const f = pendingPatternFiles[i];
+  const statusEl = document.getElementById('patf-upload-status');
+  if(!f) return;
+  if(statusEl) statusEl.textContent = `Reading ${f.name}…`;
+  try{
+    const blob = await (await fetch(f.url)).blob();
+    const res = await analyzePatternPdf(blob, { previews:false });
+    f.parsedVersion = PDF_PARSER_VERSION;
+    applyPdfFindings(res, f.name);
+  }catch(err){
+    console.warn('PDF re-read failed', err);
+    wgToast(`Couldn't read ${f.name} again right now.`, 'error');
+  }
+  if(statusEl) statusEl.textContent = '';
+}
 function removePatternFile(i){
   const f = pendingPatternFiles[i];
   if(!f) return;
   pendingPatternFiles.splice(i,1);
   pendingPatternRemovals.push(...patternFileStorageUrls(f));
   refreshPatternFiles();
+}
+/* PDFs read by an older version of the rules get read again, once, in the
+   background — only filling details that are still empty (sizes, yardage,
+   designer, gauge, hook, weight, skill). Nothing already set is changed.
+   Needs the browser to be allowed to download the file from Storage; if
+   that fails, nothing is marked and it's tried again next visit. */
+let pdfRefreshState = 'idle';   // idle | running | done
+async function refreshPatternPdfReads(){
+  if(pdfRefreshState !== 'idle' || !STATE.online || !STATE.user) return;
+  const todo = [];
+  STATE.patterns.forEach(p => (p.files||[]).forEach(f => {
+    if(/pdf/i.test(f.type||'') && (f.parsedVersion||1) < PDF_PARSER_VERSION) todo.push({ patId: p.id, url: f.url });
+  }));
+  if(!todo.length){ pdfRefreshState = 'done'; return; }
+  pdfRefreshState = 'running';
+  let updated = 0, failed = 0;
+  for(const t of todo){
+    if(STATE.showPatternForm && STATE.editingPatternId === t.patId) continue;   // being edited — leave it
+    let res;
+    try{
+      const blob = await (await fetch(t.url)).blob();
+      res = await analyzePatternPdf(blob, { previews:false });
+    }catch(err){ console.warn('PDF re-read failed', t.url, err); failed++; continue; }
+    const pat = STATE.patterns.find(p => p.id === t.patId);
+    if(!pat) continue;
+    const merged = mergePdfFindings(pat, res.found);
+    merged.files = (merged.files||[]).map(f => f.url === t.url ? { ...f, parsedVersion: PDF_PARSER_VERSION } : f);
+    if(merged.changed) updated++;
+    delete merged.changed;
+    STATE.patterns = STATE.patterns.map(p => p.id === pat.id ? merged : p);
+  }
+  // Failures aren't marked, so they're retried on the next visit — not in a loop now.
+  pdfRefreshState = 'done';
+  if(failed < todo.length) await persist();
+  if(updated){
+    if(STATE.tab === 'patterns' && !STATE.showPatternForm) renderTab();
+    wgToast(`Read ${updated} pattern PDF${updated===1?'':'s'} again — added sizes and yardage where they were missing.`, 'success');
+  }
+}
+/* Pure: fill a pattern's empty details from PDF findings. Returns a new
+   pattern with changed=true if anything was added. */
+function mergePdfFindings(pat, found){
+  const out = { ...pat };
+  let changed = false;
+  const f = found || {};
+  if(f.sizes && f.sizes.length && !(pat.sizes||[]).length){ out.sizes = f.sizes.map(x=>({ ...x })); changed = true; }
+  if(f.yardage && !pat.yardage && !(out.sizes||[]).length){ out.yardage = f.yardage; changed = true; }
+  ['designer','needleSize','weightCategory','skillLevel'].forEach(k => {
+    if(f[k] && !pat[k]){ out[k] = f[k]; changed = true; }
+  });
+  if(f.gauge && !(pat.gauge && (pat.gauge.sts || pat.gauge.rows))){ out.gauge = { ...f.gauge }; changed = true; }
+  out.changed = changed;
+  return out;
 }
 function renderPatternForm(){
   const editing = STATE.patterns.find(p=>p.id===STATE.editingPatternId) || null;
@@ -5130,8 +5394,12 @@ function renderPatternForm(){
       <select id="patf-weight"><option value="">—</option>${WEIGHTS.map(w=>`<option value="${w}" ${editing&&editing.weightCategory===w?'selected':''}>${esc(weightLabel(w))}</option>`).join('')}</select>
     </label>
     <label class="field">Yardage needed (${unitLabel()}, optional)
-      <input id="patf-yardage" type="number" min="0" step="any" value="${editing && editing.yardage ? toDisplayLength(editing.yardage) : ''}" />
+      <input id="patf-yardage" type="number" min="0" step="any" placeholder="If one size" value="${editing && editing.yardage ? toDisplayLength(editing.yardage) : ''}" />
     </label>
+    <div class="field span2">
+      <span class="note field-label">Sizes or versions (optional) — yardage for each, in ${unitLabel()}. When listed, these are used instead of the single yardage.</span>
+      <div id="patf-sizes">${buildPatternSizesHTML()}</div>
+    </div>
     <label class="field">Hook / needle size (optional)
       <input id="patf-needle" placeholder="e.g. 4.5 mm / US 7" value="${v('needleSize')}" />
     </label>
@@ -5187,6 +5455,7 @@ function handleSavePattern(e){
     tags: document.getElementById('patf-tags').value.split(',').map(t=>t.trim()).filter(Boolean),
     notes: document.getElementById('patf-notes').value.trim() || null,
     files: pendingPatternFiles.map(f=>({ ...f })),
+    sizes: cleanPatternSizes(pendingPatternSizes),
     coverUrl: pendingPatternCover === 'none' ? 'none' : (resolvePatternCover(pendingPatternFiles, pendingPatternCover) || null),
     updatedAt: new Date().toISOString()
   };
@@ -5197,7 +5466,7 @@ function handleSavePattern(e){
   }
   // Files removed on the form are only deleted now that the change is saved.
   pendingPatternRemovals.forEach(url => window.FB.deletePhoto(url));
-  pendingPatternFiles = []; pendingPatternUploads = []; pendingPatternRemovals = []; pendingPatternCover = null;
+  pendingPatternFiles = []; pendingPatternUploads = []; pendingPatternRemovals = []; pendingPatternCover = null; pendingPatternSizes = [];
   persist();
   STATE.showPatternForm = false;
   STATE.editingPatternId = null;
@@ -5218,25 +5487,48 @@ function updatePatternStatus(id, status){
   STATE.patterns = STATE.patterns.map(p => p.id===id ? { ...p, status, updatedAt:new Date().toISOString() } : p);
   persist();
 }
+/* Yardage a pattern needs: its sizes' smallest–largest, or the single figure. */
+function patternYardageRange(pat){
+  const ys = (pat.sizes||[]).map(x=>Number(x.yardage)).filter(n=>n>0);
+  if(ys.length) return { min: Math.min(...ys), max: Math.max(...ys), count: ys.length };
+  return pat.yardage ? { min: pat.yardage, max: pat.yardage, count: 0 } : null;
+}
+function formatYardageRange(r){
+  const f = n => toDisplayLength(n).toLocaleString();
+  return r.min === r.max ? `${f(r.min)} ${unitLabel()}` : `${f(r.min)}–${f(r.max)} ${unitLabel()}`;
+}
+/* Pure: which sizes a given length covers → "XS–L", "XS", or null. Sizes
+   are taken in order of yardage, so this is the run from the smallest. */
+function patternSizesCovered(sizes, have){
+  const sorted = (sizes||[]).filter(x=>x.yardage>0).slice().sort((a,b)=>a.yardage-b.yardage);
+  const ok = sorted.filter(x => x.yardage <= have);
+  if(!ok.length) return null;
+  return ok.length === 1 ? ok[0].label : `${ok[0].label}–${ok[ok.length-1].label}`;
+}
 /* Stash check: which single stash yarns of the pattern's weight have enough
-   length on their own. */
+   length on their own (for sized patterns, enough for at least the
+   smallest size). */
 function patternStashMatches(pat){
-  if(!pat.weightCategory || !pat.yardage) return null;
+  const r = patternYardageRange(pat);
+  if(!pat.weightCategory || !r) return null;
   const same = STATE.yarns.filter(y=>y.weightCategory===pat.weightCategory && (Number(y.yardageRemaining)||0)>0);
-  const enough = same.filter(y=>(Number(y.yardageRemaining)||0) >= pat.yardage)
+  const enough = same.filter(y=>(Number(y.yardageRemaining)||0) >= r.min)
     .sort((a,b)=>(Number(b.yardageRemaining)||0)-(Number(a.yardageRemaining)||0));
   const best = same.slice().sort((a,b)=>(Number(b.yardageRemaining)||0)-(Number(a.yardageRemaining)||0))[0] || null;
-  return { enough, best, sameCount: same.length };
+  return { enough, best, sameCount: same.length, need: r.min, sized: r.count > 0 };
 }
 function renderPatternStashLine(pat){
   const m = patternStashMatches(pat);
   if(!m) return '';
   if(m.enough.length){
-    return `<details class="note pattern-stash"><summary class="ok-text">🧶 ${m.enough.length} stash yarn${m.enough.length===1?' has':'s have'} enough</summary>
-      <div class="scrap-chips mt-1">${m.enough.slice(0,8).map(y=>`<span class="scrap-chip"><span class="dot" style="background:${y.colorHex}; width:9px; height:9px; border-radius:50%; display:inline-block;"></span> ${esc(yarnDisplayName(y))} (${toDisplayLength(y.yardageRemaining)} ${unitLabel()})&nbsp;</span>`).join('')}</div>
+    return `<details class="note pattern-stash"><summary class="ok-text">🧶 ${m.enough.length} stash yarn${m.enough.length===1?' has':'s have'} enough${m.sized ? ' for some sizes' : ''}</summary>
+      <div class="scrap-chips mt-1">${m.enough.slice(0,8).map(y=>{
+        const covers = m.sized ? patternSizesCovered(pat.sizes, Number(y.yardageRemaining)||0) : null;
+        return `<span class="scrap-chip"><span class="dot" style="background:${y.colorHex}; width:9px; height:9px; border-radius:50%; display:inline-block;"></span> ${esc(yarnDisplayName(y))} (${toDisplayLength(y.yardageRemaining)} ${unitLabel()}${covers ? ` · ${esc(covers)}` : ''})&nbsp;</span>`;
+      }).join('')}</div>
     </details>`;
   }
-  if(m.best) return `<p class="note pattern-stash no-margin">🧶 No single ${esc(pat.weightCategory)} yarn has ${toDisplayLength(pat.yardage)} ${unitLabel()} — most is ${esc(yarnDisplayName(m.best))} (${toDisplayLength(m.best.yardageRemaining)} ${unitLabel()})</p>`;
+  if(m.best) return `<p class="note pattern-stash no-margin">🧶 No single ${esc(pat.weightCategory)} yarn has ${toDisplayLength(m.need)} ${unitLabel()}${m.sized ? ' (smallest size)' : ''} — most is ${esc(yarnDisplayName(m.best))} (${toDisplayLength(m.best.yardageRemaining)} ${unitLabel()})</p>`;
   return `<p class="note pattern-stash no-margin">🧶 No ${esc(pat.weightCategory)} yarn in your stash yet</p>`;
 }
 /* Start a project from a pattern: open the project form with that pattern
@@ -5276,6 +5568,7 @@ function pickProjectPattern(id){
   const prev = STATE.patterns.find(p=>p.id===pendingProjectPatternId);
   const pat = STATE.patterns.find(p=>p.id===id) || null;
   pendingProjectPatternId = pat ? pat.id : null;
+  if(!pat || !(pat.sizes||[]).some(x => x.label === pendingProjectPatternSize)) pendingProjectPatternSize = null;
   if(prev){
     pendingProjectLinks = pendingProjectLinks.filter(l => l.fromPattern !== prev.id);
     ['pf-pattern','pf-name'].forEach(f => { if(el(f) && el(f).value.trim() === prev.name) el(f).value = ''; });
@@ -5299,7 +5592,23 @@ function pickProjectPattern(id){
       pendingProjectLinks.push({ id: uid(), url: pat.sourceUrl, type:'link', title: pat.name, thumbnail:null, fromPattern: pat.id });
   }
   renderLinkPreviews();
+  refreshProjectPatternSize();
 }
+/* Size/version of the linked pattern this project is made in, and the
+   yardage the pattern calls for in it. */
+function buildProjectPatternSizeHTML(){
+  const pat = STATE.patterns.find(p=>p.id===pendingProjectPatternId);
+  const sizes = (pat && pat.sizes) || [];
+  if(!sizes.length) return '';
+  const chosen = sizes.find(x => x.label === pendingProjectPatternSize);
+  return `<select id="pf-pattern-size-pick" onchange="pickProjectPatternSize(this.value)" aria-label="Pattern size" style="margin-top:6px;">
+      <option value="">Which size are you making?</option>
+      ${sizes.map(x=>`<option value="${esc(x.label)}" ${chosen===x?'selected':''}>${esc(x.label)} — ${toDisplayLength(x.yardage).toLocaleString()} ${unitLabel()}</option>`).join('')}
+    </select>
+    ${chosen ? `<span class="note" style="font-size:0.75rem; display:block; margin-top:4px;">Pattern calls for ${toDisplayLength(chosen.yardage).toLocaleString()} ${unitLabel()} in ${esc(chosen.label)}${pendingProjectYarnIds.length===1 ? " — saved as your yarn's need if it has none yet" : ''}.</span>` : ''}`;
+}
+function refreshProjectPatternSize(){ const el = document.getElementById('pf-pattern-size'); if(el) el.innerHTML = buildProjectPatternSizeHTML(); }
+function pickProjectPatternSize(label){ pendingProjectPatternSize = label || null; refreshProjectPatternSize(); }
 /* Load the pattern's gauge into the calculator as the target to compare to. */
 function patternToGauge(id){
   const pat = STATE.patterns.find(p=>p.id===id);
@@ -5327,7 +5636,7 @@ function renderPatternCard(pat){
   const meta = [
     pat.craft && pat.craft!=='other' ? (pat.craft==='crochet'?'Crochet':'Knit') : null,
     pat.weightCategory ? weightLabel(pat.weightCategory) : null,
-    pat.yardage ? `${toDisplayLength(pat.yardage)} ${unitLabel()}` : null,
+    patternYardageRange(pat) ? formatYardageRange(patternYardageRange(pat)) + ((pat.sizes||[]).length ? ` · ${pat.sizes.length} sizes` : '') : null,
     pat.needleSize ? `🪡 ${pat.needleSize}` : null,
     pat.gauge && (pat.gauge.sts||pat.gauge.rows) ? `📐 ${pat.gauge.sts||'?'}×${pat.gauge.rows||'?'}/${pat.gauge.unit==='cm'?'10cm':'4in'}` : null,
     pat.skillLevel
@@ -5343,6 +5652,9 @@ function renderPatternCard(pat){
         ${PATTERN_STATUSES.map(([k,l])=>`<option value="${k}" ${pat.status===k?'selected':''}>${l}</option>`).join('')}
     </select>
     ${meta.length ? `<p class="note pattern-meta">${meta.map(esc).join(' · ')}</p>` : ''}
+    ${(pat.sizes||[]).length ? `<details class="note pattern-sizes"><summary>Yardage by size</summary>
+      <table>${pat.sizes.map(x=>`<tr><td>${esc(x.label)}</td><td>${toDisplayLength(x.yardage).toLocaleString()} ${unitLabel()}</td></tr>`).join('')}</table>
+    </details>` : ''}
     ${(pat.tags||[]).length ? `<div class="scrap-chips mt-1">${pat.tags.map(t=>`<button type="button" class="pattern-tag" onclick="setPatternSearch(${esc(JSON.stringify(t))}, true)">#${esc(t)}</button>`).join('')}</div>` : ''}
     ${(pat.files||[]).length || pat.sourceUrl ? `<div class="link-strip">
       ${(pat.files||[]).map(f=>patternFilePreview(f, cover)
