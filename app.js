@@ -4602,7 +4602,7 @@ function onPatternFileDrop(e){
 async function uploadPatternFiles(fileList){
   const files = [...(fileList||[])];
   if(!files.length || !STATE.user) return;
-  const statusEl = document.getElementById('patf-status');
+  const statusEl = document.getElementById('patf-upload-status');
   for(const file of files){
     const isPdf = /pdf/i.test(file.type||'') || /\.pdf$/i.test(file.name||'');
     if(!isPdf && !isAcceptableImageFile(file)){ wgToast(`${file.name}: only PDFs and images can be uploaded.`, 'error'); continue; }
@@ -4657,7 +4657,7 @@ function renderPatternForm(){
         <span class="note">${ICONS.upload} Drop files here or tap to choose</span>
         <input type="file" accept="application/pdf,.pdf,image/*,.heic,.heif" multiple style="display:none;" onchange="uploadPatternFiles(this.files); this.value='';" />
       </label>
-      <span id="patf-status" class="note" style="font-size:0.75rem;"></span>
+      <span id="patf-upload-status" class="note" style="font-size:0.75rem;"></span>
       <div id="patf-files">${buildPatternFilesHTML()}</div>
     </div>
     <label class="field span2">Source link (optional)
@@ -4714,7 +4714,7 @@ function handleSavePattern(e){
     name,
     designer: document.getElementById('patf-designer').value.trim() || null,
     craft: document.getElementById('patf-craft').value,
-    status: document.getElementById('patf-status').value,
+    status: document.getElementById('patf-status').value || 'saved',
     sourceUrl: document.getElementById('patf-url').value.trim() || null,
     weightCategory: document.getElementById('patf-weight').value || null,
     yardage: yd==='' ? null : Math.round(fromInputLength(yd)),
