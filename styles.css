@@ -54,7 +54,12 @@
   .reset-btn{ background:none; border:none; color:var(--ink-soft); font-size:0.75rem; cursor:pointer; display:inline-flex; align-items:center; gap:5px; }
   .reset-btn:hover{ color:var(--wine); }
 
-  nav.tabs{ display:flex; gap:20px; border-bottom:1px solid var(--border); margin-bottom:26px; flex-wrap:wrap; }
+  nav.tabs{ display:flex; gap:20px; border-bottom:1px solid var(--border); margin-bottom:26px; flex-wrap:nowrap; }
+  nav.tabs button{ white-space:nowrap; flex-shrink:0; }
+  nav.tabs.tight{ gap:12px; }
+  nav.tabs.tight button{ font-size:0.84rem; gap:4px; }
+  /* Too many to fit: two even rows (fitTabs sets --tab-cols to half the tabs) */
+  nav.tabs.two-rows{ display:grid; grid-template-columns:repeat(var(--tab-cols, 5), minmax(0, auto)); justify-content:start; column-gap:20px; row-gap:6px; }
   nav.tabs button{
     background:none; border:none; cursor:pointer; padding-bottom:10px; margin-bottom:-1px;
     font-family:inherit; font-size:0.9rem; font-weight:500; color:var(--ink-soft);
@@ -646,10 +651,21 @@ textarea{ resize:vertical; }
 .scrap-chip .scrap-chip-main{ color:var(--ink); font-size:0.72rem; padding:0; text-decoration:underline dotted; }
 
 /* Pattern library */
-.pattern-grid{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
-@media (max-width:760px){ .pattern-grid{ grid-template-columns:minmax(0,1fr); } }
-.pattern-card{ min-width:0; display:flex; flex-direction:column; }
+.pattern-grid{ display:grid; grid-template-columns:repeat(auto-fill, minmax(200px, 1fr)); gap:12px; }
+@media (max-width:760px){ .pattern-grid{ grid-template-columns:repeat(auto-fill, minmax(150px, 1fr)); gap:10px; } }
+.pattern-card{ min-width:0; display:flex; flex-direction:column; padding:12px; }
 .pattern-card .project-name{ margin:0; }
+.pattern-title{ font-family:'Fraunces',serif; font-weight:600; font-size:0.95rem; line-height:1.25; overflow-wrap:anywhere; }
+.pattern-designer{ font-size:0.75rem; }
+.pattern-status{ align-self:flex-start; margin-top:6px; max-width:100%; }
+.pattern-meta{ margin:6px 0 0; font-size:0.74rem; }
+.pattern-card .link-strip{ gap:6px; }
+.pattern-card .link-card{ max-width:100%; }
+.pattern-card .link-card img{ width:36px; height:28px; }
+/* Actions sit at the bottom so cards in a row line up */
+.pattern-actions{ display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin-top:auto; padding-top:10px; }
+.pattern-actions .btn-small{ padding:4px 8px; font-size:0.74rem; }
+.pattern-edit{ display:inline-flex; gap:4px; margin-left:auto; }
 .pattern-stash{ margin-top:8px; }
 .pattern-stash summary{ cursor:pointer; }
 .pattern-tag{ background:none; border:1px solid var(--border); border-radius:999px; padding:1px 8px; font-size:0.7rem; color:var(--ink-soft); cursor:pointer; font-family:inherit; }
@@ -658,6 +674,10 @@ textarea{ resize:vertical; }
 .pattern-file-thumb{ width:22px; height:22px; object-fit:cover; border-radius:4px; display:block; }
 .pattern-cover{ display:block; margin:0 0 10px; border-radius:8px; overflow:hidden; border:1px solid var(--border); background:var(--bg); }
 .pattern-cover img{ display:block; width:100%; aspect-ratio:4/3; object-fit:cover; }
+.cover-picker{ display:flex; flex-wrap:wrap; gap:8px; margin-top:4px; }
+.cover-option{ width:72px; height:54px; padding:0; border:2px solid var(--border); border-radius:7px; overflow:hidden; background:var(--bg); cursor:pointer; font:inherit; font-size:0.7rem; color:var(--ink-soft); }
+.cover-option img{ width:100%; height:100%; object-fit:cover; display:block; }
+.cover-option.selected{ border-color:var(--plum); box-shadow:0 0 0 2px color-mix(in srgb, var(--plum) 35%, transparent); }
 /* Form fields filled in from a PDF, until edited */
 .from-pdf{ background:color-mix(in srgb, var(--lilac) 16%, transparent) !important; border-color:var(--lilac) !important; }
 .pattern-inline-link{ background:none; border:none; padding:0; font:inherit; color:var(--plum); cursor:pointer; text-decoration:underline dotted; }
