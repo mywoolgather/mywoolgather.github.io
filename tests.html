@@ -249,6 +249,17 @@
     ok('pdf: empty input → all null', Object.values(parsePatternText([])).every(v=>v===null));
   }catch(e){ ok('pattern pdf block threw: '+e.message, false); }
 
+  // --- Pattern cover choice ---
+  try{
+    const files = [{ url:'a.pdf', type:'application/pdf', previews:['p1.jpg','p2.jpg'] }, { url:'b.jpg', type:'image/jpeg' }, { url:'c.pdf', type:'application/pdf' }];
+    ok('cover: defaults to the first preview', resolvePatternCover(files, null)==='p1.jpg');
+    ok('cover: chosen image is kept', resolvePatternCover(files, 'b.jpg')==='b.jpg');
+    ok('cover: chosen image gone → first available', resolvePatternCover(files.slice(1), 'p2.jpg')==='b.jpg');
+    ok('cover: "none" turns it off', resolvePatternCover(files, 'none')===null);
+    ok('cover: no previewable files → null', resolvePatternCover([files[2]], null)===null);
+    ok('cover: older PDF with only thumbUrl still counts', resolvePatternCover([{ url:'d.pdf', thumbUrl:'t.jpg' }], null)==='t.jpg');
+  }catch(e){ ok('cover block threw: '+e.message, false); }
+
   // --- closenessPercent monotonic ---
   try{
     ok('closeness identical = 100', closenessPercent(0) === 100);

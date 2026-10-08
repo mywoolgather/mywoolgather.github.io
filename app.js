@@ -4561,6 +4561,7 @@ function commitOrderImport(){
 const PDFJS_BASE = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/';
 const PDF_TEXT_PAGES = 5;     // gauge/materials are almost always up front
 const PDF_IMAGE_PAGES = 3;
+const PDF_MAX_PREVIEWS = 5;   // photos + page 1 offered as cover choices
 const PDF_THUMB_MAX = 800;    // px, longest side of the stored preview
 let pdfjsPromise = null;
 function loadPdfJs(){
@@ -4577,19 +4578,27 @@ async function analyzePatternPdf(file){
   const doc = await lib.getDocument({ data: new Uint8Array(await file.arrayBuffer()), isEvalSupported:false }).promise;
   try{
     const lines = [];
-    let best = null;
+    const found = [];
     for(let n = 1; n <= Math.min(doc.numPages, Math.max(PDF_TEXT_PAGES, PDF_IMAGE_PAGES)); n++){
       const page = await doc.getPage(n);
       if(n <= PDF_TEXT_PAGES) lines.push(...pdfTextLines(await page.getTextContent(), n));
       if(n <= PDF_IMAGE_PAGES){
-        const img = await largestPdfImage(page, lib.OPS).catch(() => null);
+        const imgs = await pdfPageImages(page, lib.OPS).catch(() => []);
         // Page 1 gets a head start: the cover photo beats a bigger step photo later on.
-        if(img && (!best || img.score * (n===1 ? 1.5 : 1) > best.score)) best = img;
+        imgs.forEach(im => { if(!found.some(f => f.id === im.id)) found.push({ ...im, score: im.score * (n===1 ? 1.5 : 1) }); });
       }
     }
-    let thumb = best ? await pdfImageToJpeg(best.img).catch(() => null) : null;
-    if(!thumb) thumb = await renderPdfPageToJpeg(await doc.getPage(1)).catch(() => null);
-    return { thumb, hasText: lines.some(l => /[a-z]{3}/i.test(l.text)), found: parsePatternText(lines) };
+    // Preview options, best first: the biggest photos, then page 1 as a whole
+    // (the person picks which one the card shows).
+    found.sort((a,b) => b.score - a.score);
+    const thumbs = [];
+    for(const f of found.slice(0, PDF_MAX_PREVIEWS - 1)){
+      const blob = await pdfImageToJpeg(f.img).catch(() => null);
+      if(blob) thumbs.push(blob);
+    }
+    const pageOne = await renderPdfPageToJpeg(await doc.getPage(1)).catch(() => null);
+    if(pageOne) thumbs.push(pageOne);
+    return { thumbs, hasText: lines.some(l => /[a-z]{3}/i.test(l.text)), found: parsePatternText(lines) };
   } finally {
     doc.destroy();
   }
@@ -4616,11 +4625,11 @@ function pdfTextLines(content, pageNum){
   }
   return lines.map(l => ({ text: l.text.replace(/\s+/g,' ').trim(), size: Math.round(l.size*10)/10, page: l.page }));
 }
-/* Walks page 1's drawing operations, tracking how much the current transform
+/* Walks a page's drawing operations, tracking how much the current transform
    scales things (its determinant), so each embedded image is scored by the
    area it actually covers on the page — not its pixel count, since tiny
    logos are often high-res. Thin banners and icons are skipped. */
-async function largestPdfImage(page, OPS){
+async function pdfPageImages(page, OPS){
   const ops = await page.getOperatorList();
   const view = page.view;
   const pageArea = Math.abs((view[2]-view[0]) * (view[3]-view[1])) || 1;
@@ -4647,11 +4656,14 @@ async function largestPdfImage(page, OPS){
     }
   }
   candidates.sort((a,b) => b.score - a.score);
-  for(const c of candidates.slice(0, 3)){
+  const out = [];
+  for(const c of candidates){
+    if(out.some(o => o.id === c.id)) continue;   // same photo drawn twice
+    if(out.length >= PDF_MAX_PREVIEWS) break;
     const img = await pdfObject(page, c.id);
-    if(img && (img.bitmap || (img.data && (img.kind === 2 || img.kind === 3)))) return { img, score: c.score };
+    if(img && (img.bitmap || (img.data && (img.kind === 2 || img.kind === 3)))) out.push({ id: c.id, img, score: c.score });
   }
-  return null;
+  return out;
 }
 function pdfObject(page, id){
   const objs = String(id).startsWith('g_') ? page.commonObjs : page.objs;
@@ -4898,6 +4910,7 @@ const PATTERN_FILE_MAX = 20 * 1024 * 1024;   // matches the Storage rule
 let pendingPatternFiles = [];        // files currently on the form ({url,name,type,size})
 let pendingPatternUploads = [];      // URLs uploaded during this form session
 let pendingPatternRemovals = [];     // URLs removed during this form session
+let pendingPatternCover = null;      // chosen cover URL, 'none', or null (= first available)
 let pendingProjectPatternId = null;  // pattern a new project was started from
 
 function patternStatusLabel(v){ const s = PATTERN_STATUSES.find(([k])=>k===v); return s ? s[1] : 'Saved'; }
@@ -4909,6 +4922,7 @@ function showPatternForm(id){
   STATE.editingPatternId = id || uid();
   const editing = id ? STATE.patterns.find(p=>p.id===id) : null;
   pendingPatternFiles = editing ? (editing.files||[]).map(f=>({ ...f })) : [];
+  pendingPatternCover = editing ? (editing.coverUrl || null) : null;
   pendingPatternUploads = [];
   pendingPatternRemovals = [];
   render();
@@ -4918,27 +4932,56 @@ function hidePatternForm(){ cleanupOpenForms(); renderTab(); }
 // discarded (they were never saved anywhere).
 function discardPatternDraftFiles(){
   pendingPatternUploads.forEach(url => window.FB.deletePhoto(url));
-  pendingPatternFiles = []; pendingPatternUploads = []; pendingPatternRemovals = [];
+  pendingPatternFiles = []; pendingPatternUploads = []; pendingPatternRemovals = []; pendingPatternCover = null;
 }
 function buildPatternFilesHTML(){
   if(!pendingPatternFiles.length) return '';
   return `<div class="scrap-chips mt-2">${pendingPatternFiles.map((f,i)=>`<span class="scrap-chip">
-    <a href="${esc(f.url)}" target="_blank" rel="noopener" class="pattern-file-link">${patternFilePreview(f) ? `<img class="pattern-file-thumb" src="${esc(patternFilePreview(f))}" alt="" />` : /pdf/i.test(f.type||'')?'📄':'🖼️'} ${esc(f.name)}</a>
+    <a href="${esc(f.url)}" target="_blank" rel="noopener" class="pattern-file-link">${patternFilePreview(f, resolvePatternCover(pendingPatternFiles, pendingPatternCover)) ? `<img class="pattern-file-thumb" src="${esc(patternFilePreview(f, resolvePatternCover(pendingPatternFiles, pendingPatternCover)))}" alt="" />` : /pdf/i.test(f.type||'')?'📄':'🖼️'} ${esc(f.name)}</a>
     <button type="button" onclick="removePatternFile(${i})" aria-label="Remove file">✕</button></span>`).join('')}</div>`;
 }
-// Image files are their own preview; PDFs get the thumbnail made on upload.
-function patternFilePreview(f){
-  if(!f) return null;
-  if(f.thumbUrl) return f.thumbUrl;
-  return /^image\//i.test(f.type||'') ? f.url : null;
+// Every image a file offers as a cover: an image file is its own; a PDF has
+// the photos (and page 1) pulled out on upload.
+function patternFilePreviews(f){
+  if(!f) return [];
+  if(f.previews && f.previews.length) return f.previews;
+  if(f.thumbUrl) return [f.thumbUrl];
+  return /^image\//i.test(f.type||'') ? [f.url] : [];
 }
-function patternCoverUrl(pat){
-  for(const f of (pat.files||[])){ const u = patternFilePreview(f); if(u) return u; }
-  return null;
+// Storage files belonging to one pattern file (the file plus its previews).
+function patternFileStorageUrls(f){
+  return [...new Set([f.url, f.thumbUrl, ...(f.previews||[])].filter(Boolean))];
+}
+/* The cover: the chosen image if it's still there, else the first one any
+   file offers. 'none' means the person turned the cover off. */
+function resolvePatternCover(files, chosen){
+  if(chosen === 'none') return null;
+  const all = (files||[]).flatMap(patternFilePreviews);
+  return all.includes(chosen) ? chosen : (all[0] || null);
+}
+function patternCoverUrl(pat){ return resolvePatternCover(pat.files, pat.coverUrl); }
+// The thumbnail a file shows in lists: the cover if it came from this file.
+function patternFilePreview(f, cover){
+  const list = patternFilePreviews(f);
+  return cover && list.includes(cover) ? cover : (list[0] || null);
+}
+function buildPatternCoverPickerHTML(){
+  const all = pendingPatternFiles.flatMap(patternFilePreviews);
+  if(!all.length) return '';
+  const current = resolvePatternCover(pendingPatternFiles, pendingPatternCover);
+  return `<span class="note field-label" style="display:block; margin-top:10px;">Cover image</span>
+    <div class="cover-picker" role="radiogroup" aria-label="Cover image">
+      ${all.map((u,i)=>`<button type="button" role="radio" aria-checked="${u===current}" class="cover-option ${u===current?'selected':''}" onclick="pickPatternCover(${i})" aria-label="Use image ${i+1} as the cover"><img src="${esc(u)}" alt="" loading="lazy" /></button>`).join('')}
+      <button type="button" role="radio" aria-checked="${!current}" class="cover-option cover-none ${!current?'selected':''}" onclick="pickPatternCover(-1)">No cover</button>
+    </div>`;
+}
+function pickPatternCover(i){
+  pendingPatternCover = i < 0 ? 'none' : (pendingPatternFiles.flatMap(patternFilePreviews)[i] || null);
+  refreshPatternFiles();
 }
 function refreshPatternFiles(){
   const el = document.getElementById('patf-files');
-  if(el) el.innerHTML = buildPatternFilesHTML();
+  if(el) el.innerHTML = buildPatternFilesHTML() + buildPatternCoverPickerHTML();
 }
 function onPatternFileDrop(e){
   e.preventDefault();
@@ -4970,12 +5013,15 @@ async function uploadPatternFiles(fileList){
       if(reading){
         if(statusEl) statusEl.textContent = `Reading ${file.name}…`;
         const res = await reading;
-        if(res && res.thumb){
+        const previews = [];
+        for(const [k, thumb] of ((res && res.thumbs) || []).entries()){
           try{
-            entry.thumbUrl = await window.FB.uploadPatternFile(STATE.user.uid, STATE.editingPatternId, res.thumb, `${fileId}-${safe}-preview.jpg`, 'image/jpeg');
-            pendingPatternUploads.push(entry.thumbUrl);
+            const pu = await window.FB.uploadPatternFile(STATE.user.uid, STATE.editingPatternId, thumb, `${fileId}-${safe}-preview${k+1}.jpg`, 'image/jpeg');
+            pendingPatternUploads.push(pu);
+            previews.push(pu);
           }catch(err){ console.warn('PDF preview upload failed', err); }
         }
+        if(previews.length){ entry.previews = previews; entry.thumbUrl = previews[0]; }
         if(res) applyPdfFindings(res, file.name);
       }
       pendingPatternFiles.push(entry);
@@ -5028,8 +5074,7 @@ function removePatternFile(i){
   const f = pendingPatternFiles[i];
   if(!f) return;
   pendingPatternFiles.splice(i,1);
-  pendingPatternRemovals.push(f.url);
-  if(f.thumbUrl) pendingPatternRemovals.push(f.thumbUrl);
+  pendingPatternRemovals.push(...patternFileStorageUrls(f));
   refreshPatternFiles();
 }
 function renderPatternForm(){
@@ -5058,7 +5103,7 @@ function renderPatternForm(){
       </label>
       <span id="patf-upload-status" class="note" style="font-size:0.75rem;"></span>
       <span id="patf-pdf-note" class="note" style="font-size:0.75rem; display:block;" aria-live="polite"></span>
-      <div id="patf-files">${buildPatternFilesHTML()}</div>
+      <div id="patf-files">${buildPatternFilesHTML() + buildPatternCoverPickerHTML()}</div>
     </div>
     <label class="field span2">Source link (optional)
       <input id="patf-url" type="url" placeholder="https://www.ravelry.com/patterns/library/…" value="${v('sourceUrl')}" />
@@ -5124,6 +5169,7 @@ function handleSavePattern(e){
     tags: document.getElementById('patf-tags').value.split(',').map(t=>t.trim()).filter(Boolean),
     notes: document.getElementById('patf-notes').value.trim() || null,
     files: pendingPatternFiles.map(f=>({ ...f })),
+    coverUrl: pendingPatternCover === 'none' ? 'none' : (resolvePatternCover(pendingPatternFiles, pendingPatternCover) || null),
     updatedAt: new Date().toISOString()
   };
   if(existing){
@@ -5133,7 +5179,7 @@ function handleSavePattern(e){
   }
   // Files removed on the form are only deleted now that the change is saved.
   pendingPatternRemovals.forEach(url => window.FB.deletePhoto(url));
-  pendingPatternFiles = []; pendingPatternUploads = []; pendingPatternRemovals = [];
+  pendingPatternFiles = []; pendingPatternUploads = []; pendingPatternRemovals = []; pendingPatternCover = null;
   persist();
   STATE.showPatternForm = false;
   STATE.editingPatternId = null;
@@ -5144,7 +5190,7 @@ async function deletePattern(id){
   const pat = STATE.patterns.find(p=>p.id===id);
   if(!pat) return;
   if(!(await wgConfirm(`Delete "${pat.name}" and its uploaded files? This cannot be undone.`, {title:'Delete pattern', okLabel:'Delete', danger:true}))) return;
-  (pat.files||[]).forEach(f => { window.FB.deletePhoto(f.url); if(f.thumbUrl) window.FB.deletePhoto(f.thumbUrl); });
+  (pat.files||[]).forEach(f => patternFileStorageUrls(f).forEach(u => window.FB.deletePhoto(u)));
   STATE.patterns = STATE.patterns.filter(p=>p.id!==id);
   STATE.projects = STATE.projects.map(p => p.patternId===id ? { ...p, patternId:null } : p);
   persist();
@@ -5226,7 +5272,7 @@ function renderPatternCard(pat){
   ].filter(Boolean);
   const projects = STATE.projects.filter(p=>p.patternId===pat.id);
   const cover = patternCoverUrl(pat);
-  const coverFile = cover && (pat.files||[]).find(f=>patternFilePreview(f)===cover);
+  const coverFile = cover && (pat.files||[]).find(f=>patternFilePreviews(f).includes(cover));
   return `<div class="card pattern-card">
     ${cover ? `<a class="pattern-cover" href="${esc(coverFile.url)}" target="_blank" rel="noopener" aria-label="Open ${esc(coverFile.name)}"><img src="${esc(cover)}" alt="" loading="lazy" /></a>` : ''}
     <div class="row-between" style="align-items:flex-start;">
@@ -5241,8 +5287,8 @@ function renderPatternCard(pat){
     ${meta.length ? `<p class="note" style="margin:6px 0 0;">${meta.map(esc).join(' · ')}</p>` : ''}
     ${(pat.tags||[]).length ? `<div class="scrap-chips mt-1">${pat.tags.map(t=>`<button type="button" class="pattern-tag" onclick="setPatternSearch(${esc(JSON.stringify(t))}, true)">#${esc(t)}</button>`).join('')}</div>` : ''}
     ${(pat.files||[]).length || pat.sourceUrl ? `<div class="link-strip">
-      ${(pat.files||[]).map(f=>patternFilePreview(f)
-        ? `<a class="link-card" href="${esc(f.url)}" target="_blank" rel="noopener"><img src="${esc(patternFilePreview(f))}" alt="" loading="lazy" /><span class="link-title">${esc(f.name)}</span></a>`
+      ${(pat.files||[]).map(f=>patternFilePreview(f, cover)
+        ? `<a class="link-card" href="${esc(f.url)}" target="_blank" rel="noopener"><img src="${esc(patternFilePreview(f, cover))}" alt="" loading="lazy" /><span class="link-title">${esc(f.name)}</span></a>`
         : `<a class="link-card generic" href="${esc(f.url)}" target="_blank" rel="noopener">${/pdf/i.test(f.type||'')?'📄':'🖼️'}<span class="link-title">${esc(f.name)}</span></a>`).join('')}
       ${pat.sourceUrl ? `<a class="link-card generic" href="${esc(pat.sourceUrl)}" target="_blank" rel="noopener">${ICONS.link}<span class="link-title">${esc(linkHostname(pat.sourceUrl))}</span></a>` : ''}
     </div>` : ''}
