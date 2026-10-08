@@ -209,6 +209,46 @@
     ok('uk: "each" price is per skein (×10 @ £1.89)', sc.quantity===10 && sc.cost===1.89 && sc.colorway==='074 Mercury' && sc.skeinWeightGrams===50);
   }catch(e){ ok('order import block threw: '+e.message, false); }
 
+  // --- Pattern PDF text → details (rule-based) ---
+  try{
+    const knit = parsePatternText([
+      {text:'GARDENIA SHAWL', size:28, page:1},
+      {text:'Designed by Jane Doe', size:12, page:1},
+      {text:'Skill Level: Intermediate', size:10, page:1},
+      {text:'Yarn: Malabrigo Rios (210 yds / 192 m per 100 g skein), 4 (5, 6) skeins of worsted weight', size:10, page:1},
+      {text:'Needles: US 7 (4.5 mm) 32" circular needle; tapestry needle', size:10, page:1},
+      {text:'Gauge: 18 sts and 24 rows = 4"/10 cm in St st', size:10, page:1},
+      {text:'Row 1: K2, p2, k2tog, ssk, knit to end. Purl back.', size:10, page:2},
+      {text:'© 2024 Jane Doe Designs. All rights reserved.', size:8, page:2}
+    ]);
+    ok('pdf: biggest page-1 text is the name (ALL CAPS → Title Case)', knit.name==='Gardenia Shawl');
+    ok('pdf: "Designed by" → designer', knit.designer==='Jane Doe');
+    ok('pdf: knit terms → knit', knit.craft==='knit');
+    ok('pdf: gauge 18×24 per 4 in', knit.gauge && knit.gauge.sts===18 && knit.gauge.rows===24 && knit.gauge.unit==='in');
+    ok('pdf: needle "4.5 mm / US 7"', knit.needleSize==='4.5 mm / US 7');
+    ok('pdf: per-skein yds × largest skein count (210 × 6)', knit.yardage===1260);
+    ok('pdf: worsted weight', knit.weightCategory==='Worsted');
+    ok('pdf: skill level', knit.skillLevel==='Intermediate');
+
+    const cro = parsePatternText(['Sunny Granny Blanket','Pattern by MARIA LOPEZ','Approximately 880 (960, 1,040) yards of DK weight yarn',
+      'Hook: 4 mm (G-6) crochet hook','Gauge: 14 sc x 16 rows = 4 in','Rnd 1: ch 4, sl st to join. Ch 3, 2 dc, ch 2, 3 dc. Sc in next st, hdc.','Level: Easy']);
+    ok('pdf: crochet terms → crochet', cro.craft==='crochet');
+    ok('pdf: all-caps designer → Title Case', cro.designer==='Maria Lopez');
+    ok('pdf: stated total yardage, largest size, "1,040" is one number', cro.yardage===1040);
+    ok('pdf: hook "4 mm / G-6"', cro.needleSize==='4 mm / G-6');
+    ok('pdf: DK + Easy', cro.weightCategory==='DK' && cro.skillLevel==='Easy');
+
+    const uk = parsePatternText(['Hat','Tension: 22 sts and 30 rows to 10 cm over stocking stitch using 4mm needles',
+      'You will need 2 x 50g balls of Rowan Felted Tweed DK (175 m / 50 g)']);
+    ok('pdf: 10 cm gauge', uk.gauge && uk.gauge.sts===22 && uk.gauge.rows===30 && uk.gauge.unit==='cm');
+    ok('pdf: metres per ball × "2 x 50g" → yards', uk.yardage===Math.round(175*YD_PER_M*2));
+    const half = parsePatternText(['Gauge: 9 sts and 12 rows over 2"']);
+    ok('pdf: gauge over 2" scaled to 4"', half.gauge && half.gauge.sts===18 && half.gauge.rows===24);
+    const none = parsePatternText(['A lovely easy lace pattern for summer']);
+    ok('pdf: prose "easy lace pattern" sets no skill or weight', none.skillLevel===null && none.weightCategory===null);
+    ok('pdf: empty input → all null', Object.values(parsePatternText([])).every(v=>v===null));
+  }catch(e){ ok('pattern pdf block threw: '+e.message, false); }
+
   // --- closenessPercent monotonic ---
   try{
     ok('closeness identical = 100', closenessPercent(0) === 100);
