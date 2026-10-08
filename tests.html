@@ -315,6 +315,32 @@
     ok('cover: older PDF with only thumbUrl still counts', resolvePatternCover([{ url:'d.pdf', thumbUrl:'t.jpg' }], null)==='t.jpg');
   }catch(e){ ok('cover block threw: '+e.message, false); }
 
+  // --- Bulk add: grouping files into patterns by name ---
+  try{
+    ok('bulk key: role words, camel case, versions dropped', patternFileKey('TheTesseraeJumperColourUpdate.pdf')==='tesserae jumper' && patternFileKey('The_Tesserae_Jumper_Chart.pdf')==='tesserae jumper');
+    ok('bulk key: glued version suffix and double extension', patternFileKey('Garteraddonsv11.pdf.pdf')==='garteraddons' && patternFileKey('ElementsBikiniBottomsV11.pdf')==='elements bikini bottoms');
+    ok('bulk key: lookbook and crochet pattern match', patternFileKey('Deadly_nightshade_cardigan_lookbook.pdf')===patternFileKey('Deadly_nightshade_cardigan_crochet_pattern.pdf'));
+    ok('bulk keys: shorter name starts the longer', patternKeysMatch('venus', 'venus full set') && !patternKeysMatch('elements bikini bottoms', 'elements skirt'));
+    const files = ['Venus_full_set_crochet_pattern.pdf','Venus_lookbook.pdf','poison_ivy_lookbook_1.pdf','Poison_ivy_cardigan_crochet_pattern.pdf',
+      'PKC_HolidayDoodle_Infinity.pdf','PKC_HolidayDoodle_Exp1_Charts.pdf','PKC_WinterSkiesDoodle_Infinity.pdf','Mushroom_Applique_Pattern_Link.pdf','Mushroom_Applique_PDF_Pattern_Fast.pdf',
+      'ElementsBikiniBottomsV11.pdf','Thelementsskirtv12.pdf','LovelaceTop.pdf'].map((name,i) => ({ name, size: 1000+i, foundName: null }));
+    const lib = [{ id:'L', name:'Lovelace Top', files:[{ name:'LovelaceTop.pdf', size: 1011 }] }, { id:'M', name:'Mosey Sweater', files:[] }];
+    const r = groupPatternFiles(files, lib);
+    const groupOf = n => r.groups.find(g => g.items.some(i => files[i].name === n));
+    ok('bulk group: pattern + lookbook together, pattern first', groupOf('Venus_lookbook.pdf') === groupOf('Venus_full_set_crochet_pattern.pdf') && files[groupOf('Venus_lookbook.pdf').items[0]].name.startsWith('Venus_full'));
+    ok('bulk group: lookbook listed first still ends up second', files[groupOf('poison_ivy_lookbook_1.pdf').items[0]].name.startsWith('Poison_ivy_cardigan'));
+    ok('bulk group: charts expansion joins its cowl, other cowl stays apart', groupOf('PKC_HolidayDoodle_Exp1_Charts.pdf') === groupOf('PKC_HolidayDoodle_Infinity.pdf') && groupOf('PKC_WinterSkiesDoodle_Infinity.pdf') !== groupOf('PKC_HolidayDoodle_Infinity.pdf'));
+    ok('bulk group: link sheet joins its pattern', groupOf('Mushroom_Applique_Pattern_Link.pdf') === groupOf('Mushroom_Applique_PDF_Pattern_Fast.pdf'));
+    ok('bulk group: two Elements patterns stay apart', groupOf('ElementsBikiniBottomsV11.pdf') !== groupOf('Thelementsskirtv12.pdf'));
+    ok('bulk group: same name + size already in library → skipped', r.duplicates.length===1 && files[r.duplicates[0]].name==='LovelaceTop.pdf');
+    const r2 = groupPatternFiles([{ name:'TheMoseySweaterCrochetPattern.pdf', size:5 }], lib);
+    ok('bulk group: matches an existing pattern by name', r2.groups[0].existingId === 'M');
+    ok('bulk name: PDF title used when it fits the file', bulkPatternName('Aurora_top_pattern.pdf', 'Aurora top')==='Aurora top');
+    ok('bulk name: junk title falls back to the file name', bulkPatternName('Persephone_top_lookbook.pdf', 'By: @nikita_crochets_ (designer) Size: small/medium.')==='Persephone top' && bulkPatternName('Mushroom_Applique_Pattern_Link.pdf', 'Hello!')==='Mushroom Applique Link');
+    ok('bulk name: shouting title tidied', bulkPatternName('Mushroom_Applique_PDF_Pattern_Fast.pdf', 'MUSHROOM APPLIQUE PDF PATTERN - do not sell or copy')==='Mushroom Applique');
+    const m = mergeFoundDetails([{ name:'A', designer:null, craft:'crochet', yardage:684, needleSize:'4 mm' }, { designer:'@x', craft:'knit', yardage:415, needleSize:'8 mm', weightCategory:'DK' }]);
+    ok('bulk details: first file wins, later files fill gaps', m.yardage===684 && m.needleSize==='4 mm' && m.designer==='@x' && m.weightCategory==='DK' && m.craft==='crochet');
+  }catch(e){ ok('bulk add block threw: '+e.message, false); }
   // --- closenessPercent monotonic ---
   try{
     ok('closeness identical = 100', closenessPercent(0) === 100);

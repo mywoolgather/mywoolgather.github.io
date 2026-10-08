@@ -5091,7 +5091,7 @@ function patternSkillFromText(text){
 ================================================================= */
 const PATTERN_STATUSES = [['saved','Saved'],['queued','In my queue'],['made','Made it']];
 const PATTERN_SKILLS = ['Beginner','Easy','Intermediate','Experienced'];
-const PATTERN_FILE_MAX = 20 * 1024 * 1024;   // matches the Storage rule
+const PATTERN_FILE_MAX = 30 * 1024 * 1024;   // matches the Storage rule
 let pendingPatternFiles = [];        // files currently on the form ({url,name,type,size})
 let pendingPatternUploads = [];      // URLs uploaded during this form session
 let pendingPatternRemovals = [];     // URLs removed during this form session
@@ -5184,7 +5184,7 @@ async function uploadPatternFiles(fileList){
   for(const file of files){
     const isPdf = /pdf/i.test(file.type||'') || /\.pdf$/i.test(file.name||'');
     if(!isPdf && !isAcceptableImageFile(file)){ wgToast(`${file.name}: only PDFs and images can be uploaded.`, 'error'); continue; }
-    if(file.size > PATTERN_FILE_MAX){ wgToast(`${file.name} is over 20 MB.`, 'error'); continue; }
+    if(file.size > PATTERN_FILE_MAX){ wgToast(`${file.name} is over 30 MB.`, 'error'); continue; }
     if(statusEl) statusEl.textContent = `Uploading ${file.name}…`;
     try{
       // HEIC photos are converted so every browser can open them; other
@@ -5359,6 +5359,230 @@ function mergePdfFindings(pat, found){
   out.changed = changed;
   return out;
 }
+/* ---------- Bulk add patterns ----------
+   Pick many PDFs/images at once. Each PDF is read in the browser first
+   (nothing uploads until Save), files are grouped into patterns by their
+   names — lookbooks, charts and updates join their pattern — and files
+   already in the library are skipped. All rule-based. */
+// Words that say what kind of file it is rather than which pattern.
+const BULK_FILE_ROLE_WORDS = ['lookbook','look book','pattern','patterns','crochet','knit','knitting','pdf','chart','charts','colour update','color update','update','updated','english','eng','compressed','final','fast','link','links','printable','print'];
+const BULK_SECONDARY_RE = /look ?book|chart|update|link|photos?\b|gallery/i;
+// A file name reduced to the words naming the pattern:
+// 'TheTesseraeJumperColourUpdate.pdf' and 'The_Tesserae_Jumper.pdf' → 'tesserae jumper'.
+function patternFileKey(name){
+  let s = String(name||'').replace(/(\.pdf)+$/i,'').replace(/\.(jpe?g|png|webp|gif|heic|heif)$/i,'');
+  s = s.replace(/([a-z])([A-Z])/g,'$1 $2').replace(/([A-Z]+)([A-Z][a-z])/g,'$1 $2');
+  s = ' ' + s.toLowerCase().replace(/[_\-.+&,()\[\]]+/g,' ').replace(/[^a-z0-9 ]+/g,'') + ' ';
+  s = s.replace(/v\d+(?= )/g,' ').replace(/ (ed|exp|version|vol) ?\d+(?= )/g,' ').replace(/ \d{1,2}(?= )/g,' ');
+  BULK_FILE_ROLE_WORDS.forEach(w => { s = s.split(` ${w} `).join(' '); s = s.split(` ${w} `).join(' '); });
+  s = s.replace(/ (the|a|an|and|by) /g,' ').replace(/ (the|a|an|and|by) /g,' ');
+  return s.trim().replace(/\s+/g,' ');
+}
+// Two keys belong together when one's words start the other's ('venus' + 'venus full set').
+function patternKeysMatch(a, b){
+  if(!a || !b) return false;
+  const x = a.split(' '), y = b.split(' ');
+  const [short, long] = x.length <= y.length ? [x, y] : [y, x];
+  return short.every((w,i) => long[i] === w);
+}
+function isSecondaryPatternFile(name){ return BULK_SECONDARY_RE.test(String(name||'').replace(/([a-z])([A-Z])/g,'$1 $2')); }
+// A readable pattern name: the one read from the PDF when it fits the file
+// name, else the file name tidied up.
+function bulkPatternName(fileName, foundName){
+  const key = patternFileKey(fileName);
+  const words = new Set(key.split(' ').filter(w => w.length >= 3));
+  let n = String(foundName||'').split(/ [-–|] /)[0].replace(/\b(look ?book|pdf|pattern)\b/gi,'').replace(/\s+/g,' ').trim();
+  const fits = n && patternFileKey(n).split(' ').some(w => words.has(w));
+  if(!fits) n = String(fileName||'').replace(/(\.pdf)+$/i,'').replace(/\.[a-z0-9]{2,4}$/i,'').replace(/([a-z])([A-Z])/g,'$1 $2')
+    .replace(/[_]+/g,' ').replace(/\b(look ?book|crochet pattern|knitting pattern|pattern|v\d+)\b/gi,'').replace(/\s+/g,' ').trim();
+  if(n && n === n.toUpperCase()) n = n.toLowerCase().replace(/\b[a-z]/g, c => c.toUpperCase());
+  return n.charAt(0).toUpperCase() + n.slice(1);
+}
+/* Group files into patterns. items: [{ name, size, foundName }].
+   patterns: the library. Returns { groups: [{ name, existingId, items:[index…] }], duplicates:[index…] } —
+   main pattern file first in each group. */
+function groupPatternFiles(items, patterns){
+  const known = (patterns||[]).map(p => ({ id:p.id, key:patternFileKey(p.name), files:(p.files||[]).map(f => ({ key:patternFileKey(f.name), size:f.size })) }));
+  const duplicates = [], groups = [];
+  const order = items.map((it,i) => ({ i, key: patternFileKey(it.name) })).sort((a,b) => a.key.split(' ').length - b.key.split(' ').length || a.i - b.i);
+  for(const { i, key } of order){
+    const it = items[i];
+    if(known.some(p => p.files.some(f => f.size === it.size && f.key === key))){ duplicates.push(i); continue; }
+    let g = groups.find(g => patternKeysMatch(g.key, key));
+    if(!g){
+      const ex = key && known.find(p => p.key === key || (patternKeysMatch(p.key, key) && p.key.split(' ').length >= 2) || p.files.some(f => f.key === key));
+      g = { key, existingId: ex ? ex.id : null, items: [] };
+      groups.push(g);
+    }
+    g.items.push(i);
+  }
+  groups.forEach(g => {
+    g.items.sort((a,b) => isSecondaryPatternFile(items[a].name) - isSecondaryPatternFile(items[b].name) || a - b);
+    const main = items[g.items[0]];
+    g.name = bulkPatternName(main.name, main.foundName);
+  });
+  return { groups: groups.map(({ name, existingId, items }) => ({ name, existingId, items })), duplicates: duplicates.sort((a,b)=>a-b) };
+}
+// Details from several files of one pattern: the first file's win, later ones fill gaps.
+function mergeFoundDetails(list){
+  let out = { sizes: [], yardage: null, gauge: null };
+  let craft = null;
+  for(const f of list){
+    if(!f) continue;
+    out = mergePdfFindings(out, f);
+    if(!craft && f.craft) craft = f.craft;
+  }
+  delete out.changed;
+  out.craft = craft;
+  return out;
+}
+
+let bulkPatterns = null;   // { phase:'reading'|'review'|'saving', items, groups, duplicates, done, total }
+function startBulkPatternImport(fileList){
+  const files = [...(fileList||[])];
+  if(!files.length || !STATE.user) return;
+  if(!STATE.online){ wgToast("You're offline — view-only until you reconnect.", "error"); return; }
+  cleanupOpenForms();
+  const items = [];
+  for(const file of files){
+    const isPdf = /pdf/i.test(file.type||'') || /\.pdf$/i.test(file.name||'');
+    if(!isPdf && !isAcceptableImageFile(file)){ wgToast(`${file.name}: only PDFs and images can be added.`, 'error'); continue; }
+    items.push({ file, name: file.name || 'pattern', size: file.size || 0, isPdf, over: file.size > PATTERN_FILE_MAX, res: null });
+  }
+  if(!items.length) return;
+  bulkPatterns = { phase:'reading', items, groups:[], duplicates:[], done:0, total:items.length };
+  renderTab();
+  readBulkPatternFiles();
+}
+async function readBulkPatternFiles(){
+  const b = bulkPatterns;
+  for(const it of b.items){
+    if(bulkPatterns !== b) return;   // cancelled
+    if(it.isPdf) it.res = await analyzePatternPdf(it.file).catch(err => { console.warn('PDF read failed', err); return null; });
+    it.foundName = it.res && it.res.found ? it.res.found.name : null;
+    b.done++;
+    const el = document.getElementById('bulk-pat-progress');
+    if(el) el.textContent = `Reading ${b.done} of ${b.total}…`;
+  }
+  if(bulkPatterns !== b) return;
+  const { groups, duplicates } = groupPatternFiles(b.items, STATE.patterns);
+  b.groups = groups.map(g => ({ ...g, id: uid().slice(0,8), include: true }));
+  b.duplicates = duplicates;
+  b.phase = 'review';
+  renderTab();
+}
+function cancelBulkPatterns(){ bulkPatterns = null; renderTab(); }
+// Move a file to another group, or to a pattern of its own ('new').
+function bulkMoveItem(i, target){
+  const b = bulkPatterns; if(!b) return;
+  b.groups.forEach(g => { g.items = g.items.filter(x => x !== i); });
+  b.duplicates = b.duplicates.filter(x => x !== i);
+  if(target === 'skip') b.duplicates.push(i);
+  else if(target === 'new'){
+    const it = b.items[i];
+    b.groups.push({ id: uid().slice(0,8), name: bulkPatternName(it.name, it.foundName), existingId: null, items: [i], include: true });
+  } else {
+    const g = b.groups.find(g => g.id === target);
+    if(g) g.items.push(i);
+  }
+  b.groups = b.groups.filter(g => g.items.length);
+  renderTab();
+}
+function renderBulkPatterns(){
+  const b = bulkPatterns;
+  if(b.phase === 'reading' || b.phase === 'saving'){
+    return `<div class="card mb-4"><p><strong>${b.phase === 'reading' ? 'Reading your files' : 'Saving patterns'}</strong></p>
+      <p class="note" id="bulk-pat-progress">${b.phase === 'reading' ? `Reading ${b.done} of ${b.total}…` : `Uploading ${b.done} of ${b.total}…`}</p>
+      ${b.phase === 'reading' ? `<button class="btn btn-ghost btn-small mt-2" onclick="cancelBulkPatterns()">Cancel</button>` : ''}</div>`;
+  }
+  const options = (i, current) => [
+    ...b.groups.map(g => `<option value="${g.id}" ${g.id===current?'selected':''}>${esc(g.existingId ? (STATE.patterns.find(p=>p.id===g.existingId)||{}).name : g.name)}</option>`),
+    `<option value="new">New pattern</option>`, `<option value="skip" ${current==='skip'?'selected':''}>Don't add</option>`].join('');
+  const fileRow = (i, groupId) => { const it = b.items[i]; return `<div class="bulk-file-row">
+      <span class="bulk-file-name">${it.isPdf?'📄':'🖼️'} ${esc(it.name)}${it.over ? ` <span class="note">— over ${Math.round(PATTERN_FILE_MAX/1048576)} MB, only details and preview images are kept</span>` : ''}${it.isPdf && it.res && !it.res.hasText ? ` <span class="note">— scanned, preview only</span>` : ''}</span>
+      <select onchange="bulkMoveItem(${i}, this.value)" aria-label="Which pattern this file belongs to">${options(i, groupId)}</select></div>`; };
+  const included = b.groups.filter(g => g.include);
+  return `<div class="card mb-4">
+    <p><strong>Add ${b.items.length} file${b.items.length===1?'':'s'}</strong></p>
+    <p class="note">Files are grouped by name: lookbooks, charts and updates join their pattern. Check the names, move any file that landed in the wrong place, then save. Details read from each PDF fill in automatically — give them a look afterwards.</p>
+    ${b.groups.map(g => { const ex = g.existingId && STATE.patterns.find(p=>p.id===g.existingId); return `<div class="bulk-group${g.include?'':' bulk-off'}">
+      <label class="bulk-group-head"><input type="checkbox" ${g.include?'checked':''} onchange="bulkPatterns.groups.find(x=>x.id==='${g.id}').include=this.checked; renderTab();" aria-label="Add this pattern" />
+        ${ex ? `<span>Add to <strong>${esc(ex.name)}</strong> <span class="note">(already in your library)</span></span>`
+             : `<input type="text" value="${esc(g.name)}" oninput="bulkPatterns.groups.find(x=>x.id==='${g.id}').name=this.value" aria-label="Pattern name" />`}
+      </label>
+      ${g.items.map(i => fileRow(i, g.id)).join('')}
+    </div>`; }).join('')}
+    ${b.duplicates.length ? `<details class="mt-2"><summary class="note">${b.duplicates.length} file${b.duplicates.length===1?' is':'s are'} already in your library or left out</summary>${b.duplicates.map(i => fileRow(i, 'skip')).join('')}</details>` : ''}
+    <div class="row-between mt-3">
+      <button class="btn btn-ghost" onclick="cancelBulkPatterns()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveBulkPatterns()" ${included.length?'':'disabled'}>Save ${included.length} pattern${included.length===1?'':'s'}</button>
+    </div>
+  </div>`;
+}
+async function saveBulkPatterns(){
+  const b = bulkPatterns; if(!b || b.phase !== 'review') return;
+  const groups = b.groups.filter(g => g.include && g.items.length && (g.existingId || String(g.name||'').trim()));
+  if(!groups.length) return;
+  b.phase = 'saving'; b.done = 0; b.total = groups.reduce((n,g) => n + g.items.length, 0);
+  renderTab();
+  const progress = () => { const el = document.getElementById('bulk-pat-progress'); if(el) el.textContent = `Uploading ${b.done} of ${b.total}…`; };
+  let failed = 0, added = 0, updated = 0;
+  for(const g of groups){
+    const existing = g.existingId && STATE.patterns.find(p=>p.id===g.existingId);
+    const patId = existing ? existing.id : uid();
+    const files = [];
+    for(const i of g.items){
+      const it = b.items[i];
+      try{
+        const safe = it.name.replace(/\.[^.]+$/,'').replace(/[^\w\- ]+/g,'').trim().slice(0,60) || 'pattern';
+        const fileId = uid().slice(0,8);
+        const previews = [];
+        for(const [k, thumb] of ((it.res && it.res.thumbs) || []).entries()){
+          try{ previews.push(await window.FB.uploadPatternFile(STATE.user.uid, patId, thumb, `${fileId}-${safe}-preview${k+1}.jpg`, 'image/jpeg')); }
+          catch(err){ console.warn('PDF preview upload failed', err); }
+        }
+        if(it.over){
+          // Too big to store: keep its preview images (details are kept below).
+          previews.forEach((url, k) => files.push({ url, name: `${safe} preview ${k+1}.jpg`, type: 'image/jpeg', size: (it.res.thumbs[k] && it.res.thumbs[k].size) || 0 }));
+          if(!previews.length) failed++;
+        } else if(it.isPdf){
+          const url = await window.FB.uploadPatternFile(STATE.user.uid, patId, it.file, `${fileId}-${safe}.pdf`, 'application/pdf');
+          const entry = { url, name: it.name, type: 'application/pdf', size: it.size };
+          if(previews.length){ entry.previews = previews; entry.thumbUrl = previews[0]; }
+          if(it.res) entry.parsedVersion = PDF_PARSER_VERSION;
+          files.push(entry);
+        } else {
+          const blob = await toRenderableImageBlob(it.file);
+          const type = blob.type || it.file.type || 'image/jpeg';
+          const ext = (type.split('/')[1] || 'jpg').replace('jpeg','jpg');
+          const url = await window.FB.uploadPatternFile(STATE.user.uid, patId, blob, `${fileId}-${safe}.${ext}`, type);
+          files.push({ url, name: it.name, type, size: blob.size || it.size });
+        }
+      }catch(err){ console.error('Bulk pattern upload failed', err); failed++; }
+      b.done++; progress();
+    }
+    if(!files.length) continue;
+    const found = mergeFoundDetails(g.items.map(i => b.items[i].res && b.items[i].res.found));
+    const now = new Date().toISOString();
+    if(existing){
+      const merged = mergePdfFindings(existing, found); delete merged.changed;
+      STATE.patterns = STATE.patterns.map(p => p.id === existing.id ? { ...merged, files: [...(existing.files||[]), ...files], updatedAt: now } : p);
+      updated++;
+    } else {
+      const sizes = cleanPatternSizes(found.sizes);
+      STATE.patterns.push({ id: patId, name: String(g.name).trim(), designer: found.designer || null, craft: found.craft || 'knit', status: 'saved',
+        sourceUrl: null, weightCategory: found.weightCategory || null, yardage: sizes.length ? null : (found.yardage || null),
+        needleSize: found.needleSize || null, skillLevel: found.skillLevel || null, gauge: found.gauge || null, tags: [], notes: null,
+        files, sizes, coverUrl: null, updatedAt: now, createdAt: todayStr() });
+      added++;
+    }
+  }
+  bulkPatterns = null;
+  await persist();
+  renderTab();
+  const parts = [added && `${added} pattern${added===1?'':'s'} added`, updated && `${updated} updated`].filter(Boolean).join(', ');
+  wgToast(failed ? `${parts || 'Nothing saved'} — ${failed} file${failed===1?'':'s'} couldn't upload.` : `${parts}. Give the details a quick check.`, failed ? 'error' : undefined);
+}
 function renderPatternForm(){
   const editing = STATE.patterns.find(p=>p.id===STATE.editingPatternId) || null;
   const v = (field, fallback='') => editing ? esc(editing[field] ?? fallback) : fallback;
@@ -5378,7 +5602,7 @@ function renderPatternForm(){
       <select id="patf-status">${PATTERN_STATUSES.map(([k,l])=>`<option value="${k}" ${(editing?editing.status:'saved')===k?'selected':''}>${l}</option>`).join('')}</select>
     </label>
     <div class="field span2">
-      <span class="note field-label">Pattern files (PDFs or images, up to 20 MB each — private to you). Adding a PDF makes a preview and fills in any empty details it can find.</span>
+      <span class="note field-label">Pattern files (PDFs or images, up to 30 MB each — private to you). Adding a PDF makes a preview and fills in any empty details it can find.</span>
       <label class="photo-dropzone" style="max-width:none;" ondragover="event.preventDefault(); this.classList.add('dragover');" ondragleave="this.classList.remove('dragover');" ondrop="onPatternFileDrop(event)">
         <span class="note">${ICONS.upload} Drop files here or tap to choose</span>
         <input type="file" accept="application/pdf,.pdf,image/*,.heic,.heif" multiple style="display:none;" onchange="uploadPatternFiles(this.files); this.value='';" />
@@ -5699,8 +5923,11 @@ function filteredSortedPatterns(){
 function renderPatterns(){
   let html = `<div class="row-between mb-4">
     <p class="note">${STATE.patterns.length} pattern${STATE.patterns.length===1?'':'s'}</p>
-    ${!STATE.showPatternForm && STATE.online ? `<button class="btn btn-primary" onclick="showPatternForm()">${ICONS.plus} Add pattern</button>` : ''}
+    ${!STATE.showPatternForm && !bulkPatterns && STATE.online ? `<div style="display:flex; gap:8px;">
+      <label class="btn btn-ghost" title="Add many pattern files at once">${ICONS.upload} Bulk add<input type="file" accept="application/pdf,.pdf,image/*,.heic,.heif" multiple style="display:none;" onchange="startBulkPatternImport(this.files); this.value='';" /></label>
+      <button class="btn btn-primary" onclick="showPatternForm()">${ICONS.plus} Add pattern</button></div>` : ''}
   </div>`;
+  if(bulkPatterns) html += renderBulkPatterns();
   if(STATE.showPatternForm) html += renderPatternForm();
   if(STATE.patterns.length===0){
     html += `<div class="empty"><p class="title">Your pattern library is empty</p><p class="body">Save patterns you own or want to make — upload the PDF, note the yarn and gauge, and see what in your stash could work. Start a project from any pattern.</p></div>`;
