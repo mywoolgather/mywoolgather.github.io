@@ -327,10 +327,34 @@ function wgConfirm(message, { title='Are you sure?', okLabel='Confirm', danger=f
     </div>`;
     const bd = document.getElementById('wg-modal-bd');
     requestAnimationFrame(()=> bd.classList.add('open'));
-    const close = (val)=>{ bd.classList.remove('open'); setTimeout(()=>{ root.innerHTML=''; }, 160); resolve(val); };
+    const close = (val)=>{ bd.classList.remove('open'); setTimeout(()=>{ bd.remove(); }, 160); resolve(val); };
     document.getElementById('wg-ok').onclick = ()=> close(true);
     document.getElementById('wg-cancel').onclick = ()=> close(false);
     bd.onclick = (e)=>{ if(e.target===bd) close(false); };
+  });
+}
+/* A dialog with several choices: resolves to the chosen value, or null if
+   dismissed. choices: [{ label, value, detail?, primary?, danger? }]. */
+function wgChoose(message, { title='', choices=[] } = {}){
+  return new Promise(resolve=>{
+    const root = document.getElementById('wg-modal-root');
+    root.innerHTML = `<div class="wg-modal-backdrop" id="wg-modal-bd">
+      <div class="wg-modal" role="dialog" aria-modal="true">
+        ${title?`<h3>${esc(title)}</h3>`:''}
+        ${message?`<p>${esc(message)}</p>`:''}
+        <div class="wg-choices">
+          ${choices.map((c,i)=>`<button class="btn ${c.primary?'btn-primary':'btn-ghost'} wg-choice" data-i="${i}" style="${c.danger?'color:var(--wine); border-color:var(--wine);':''}">
+            <span>${esc(c.label)}</span>${c.detail?`<span class="note">${esc(c.detail)}</span>`:''}</button>`).join('')}
+        </div>
+        <div class="wg-modal-actions"><button class="btn btn-ghost" id="wg-cancel">Cancel</button></div>
+      </div>
+    </div>`;
+    const bd = document.getElementById('wg-modal-bd');
+    requestAnimationFrame(()=> bd.classList.add('open'));
+    const close = (val)=>{ bd.classList.remove('open'); setTimeout(()=>{ bd.remove(); }, 160); resolve(val); };
+    bd.querySelectorAll('.wg-choice').forEach(b => b.onclick = () => close(choices[Number(b.dataset.i)].value));
+    document.getElementById('wg-cancel').onclick = ()=> close(null);
+    bd.onclick = (e)=>{ if(e.target===bd) close(null); };
   });
 }
 function wgPrompt(message, { title='', defaultValue='', okLabel='Save', placeholder='' } = {}){
@@ -350,7 +374,7 @@ function wgPrompt(message, { title='', defaultValue='', okLabel='Save', placehol
     const bd = document.getElementById('wg-modal-bd');
     const input = document.getElementById('wg-input');
     requestAnimationFrame(()=>{ bd.classList.add('open'); input.focus(); input.select(); });
-    const close = (val)=>{ bd.classList.remove('open'); setTimeout(()=>{ root.innerHTML=''; }, 160); resolve(val); };
+    const close = (val)=>{ bd.classList.remove('open'); setTimeout(()=>{ bd.remove(); }, 160); resolve(val); };
     document.getElementById('wg-ok').onclick = ()=> close(input.value);
     document.getElementById('wg-cancel').onclick = ()=> close(null);
     input.onkeydown = (e)=>{ if(e.key==='Enter') close(input.value); if(e.key==='Escape') close(null); };
@@ -743,70 +767,438 @@ function categorizeFiber(text){
    fiber terms) rather than trusting the raw read. The photo → text step
    is tesseract.js; this function is the "make sense of it" step.
 ================================================================= */
-function parseYarnLabel(rawText){
-  const text = rawText || '';
-  const lower = text.toLowerCase();
-  const lines = text.split('\n').map(l=>l.trim()).filter(Boolean);
-  const out = { brand:null, line:null, fiber:null, weightCategory:null, skeinYardage:null, skeinWeightGrams:null, colorway:null, dyeLot:null };
-
-  // --- Brand: match against known preset brands (fuzzy, case-insensitive) ---
-  const brands = presetBrands();
-  for(const b of brands){
-    if(lower.includes(b.toLowerCase())){ out.brand = b; break; }
+/* Vocabulary the label reader matches against: preset brands/lines plus the
+   brands and yarn names already in this person's stash (so their indie
+   dyers are recognised too). */
+function labelVocabulary(){
+  const brands = new Map();   // brand → Set(lines)
+  const add = (b, l) => { if(!b) return; if(!brands.has(b)) brands.set(b, new Set()); if(l) brands.get(b).add(l); };
+  (YARN_PRESETS||[]).forEach(p => add(p.brand, p.line));
+  (typeof STATE !== 'undefined' && STATE.yarns || []).forEach(y => add(y.brand, y.line));
+  return [...brands].map(([brand, lines]) => ({ brand, lines: [...lines] }));
+}
+// Pure: edit distance, for matching names through OCR slips ("Cascade Yams").
+function levenshtein(a, b){
+  if(a === b) return 0;
+  const m = a.length, n = b.length;
+  if(!m) return n; if(!n) return m;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for(let i = 1; i <= m; i++){
+    const cur = [i];
+    for(let j = 1; j <= n; j++) cur[j] = Math.min(prev[j] + 1, cur[j-1] + 1, prev[j-1] + (a[i-1] === b[j-1] ? 0 : 1));
+    prev = cur;
   }
-  // If brand found, try to find its matching line from presets in the text.
-  if(out.brand){
-    const lines2 = YARN_PRESETS.filter(p=>p.brand===out.brand);
-    for(const p of lines2){
-      if(lower.includes(p.line.toLowerCase())){ out.line = p.line; break; }
+  return prev[n];
+}
+const labelNorm = s => String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-z0-9&]+/g,' ').trim();
+/* Pure: best place a name appears in the text, allowing small OCR errors —
+   compares the name with every run of the same number of words. Short names
+   must match exactly; longer ones may be off by ~1 character in 6.
+   Returns a score 0..1 (1 = exact) or 0. */
+function fuzzyFind(name, textNorm){
+  const target = labelNorm(name);
+  if(!target) return 0;
+  if((' ' + textNorm + ' ').includes(' ' + target + ' ')) return 1;
+  const words = textNorm.split(' '), k = target.split(' ').length;
+  const allowed = target.replace(/ /g,'').length >= 6 ? Math.floor(target.length / 6) : 0;
+  if(!allowed) return 0;
+  let best = 0;
+  for(let i = 0; i + k <= words.length; i++){
+    const cand = words.slice(i, i + k).join(' ');
+    const d = levenshtein(cand, target);
+    if(d <= allowed) best = Math.max(best, 1 - d / target.length);
+  }
+  return best;
+}
+// Fiber words in English, French, German, Spanish, Italian and Dutch → one name.
+const FIBER_VOCAB = [
+  ['Merino', ['merino','merinos','merinowolle','merinowol']],
+  ['Alpaca', ['alpaca','alpaga','alpaka']],
+  ['Mohair', ['mohair','kid mohair']],
+  ['Cashmere', ['cashmere','cachemire','kaschmir','cachemira','cashmir']],
+  ['Silk', ['silk','soie','seide','seda','seta','zijde','mulberry silk']],
+  ['Linen', ['linen','lin','leinen','lino','linnen','flax']],
+  ['Cotton', ['cotton','coton','baumwolle','algodon','cotone','katoen']],
+  ['Acrylic', ['acrylic','acrylique','polyacryl','polyacrylic','acrilico','acryl']],
+  ['Nylon', ['nylon','polyamide','polyamid','poliamida','poliammide']],
+  ['Polyester', ['polyester','poliester','poliestere']],
+  ['Viscose', ['viscose','viskose','rayon']],
+  ['Bamboo', ['bamboo','bambou','bambus','bambu']],
+  ['Yak', ['yak']], ['Camel', ['camel','kamel']], ['Llama', ['llama','lama']],
+  ['Wool', ['wool','laine','wolle','lana','wol','lan']]
+];
+const ENGLISH_FIBERS = new Set(['polyamide','merino','alpaca','mohair','kid mohair','cashmere','silk','mulberry silk','linen','flax','cotton','acrylic','nylon','polyester','viscose','rayon','bamboo','yak','camel','llama','wool']);
+/* Words that describe a fiber rather than name it ("Peruvian Highland Wool",
+   "Mercerized Cotton"): kept in the phrase; anything after the last fiber
+   or qualifier word is OCR noise and is cut off. */
+const FIBER_QUALIFIERS = ['superwash','extrafine','extra','fine','peruvian','highland','baby','kid','mulberry','mercerized','mercerised','organic',
+  'recycled','virgin','lambswool','royal','pima','egyptian','merino','shetland','bluefaced','leicester','british','corriedale','targhee','tussah','suri','brushed','tencel','lyocell'];
+/* The label phrase bank — words that turn up on ball bands, in the languages
+   labels commonly use. The reader uses it two ways: as keywords for each
+   field, and as a dictionary to correct OCR slips in those words
+   ("Partip" → "Partie", "Mercenzed" → "Mercerized", "Colqur" → "Colour"). */
+const LABEL_PHRASES = {
+  length: ['length','yardage','yards','metres','meters','meterage','metrage','lauflange','lange','largo','lunghezza','longueur','approx','approximately','ball','skein','hank','per'],
+  weight: ['weight','net','netto','nettogewicht','gewicht','peso','poids','grams','ounces'],
+  colour: ['colour','color','colorway','colourway','shade','farbe','coloris','couleur','nuance','kleur','tono','colore'],
+  lot: ['lot','dye','batch','partie','bain','lote','charge','lotto','farbpartie'],
+  yarnWeight: ['lace','cobweb','fingering','sock','sport','double','knitting','worsted','aran','afghan','bulky','chunky','super','jumbo','medium','light','fine','category','ply','yarn'],
+  other: ['composition','superwash','machine','wash','hand','only','needle','needles','gauge','tension','hook','recommended','tumble','dry','bleach','clean','iron','flat','made']
+};
+let _labelLexicon = null;
+function labelLexicon(vocab){
+  const words = new Set();
+  const add = s => labelNorm(s).split(' ').forEach(w => { if(w.length >= 4 && /^[a-z]+$/.test(w)) words.add(w); });
+  Object.values(LABEL_PHRASES).flat().forEach(add);
+  FIBER_QUALIFIERS.forEach(add);
+  FIBER_VOCAB.forEach(([name, keys]) => { add(name); keys.forEach(add); });
+  (vocab||[]).forEach(v => { add(v.brand); (v.lines||[]).forEach(add); });
+  return words;
+}
+/* Pure: correct OCR slips in label words against the phrase bank (and known
+   brand/yarn names): a word of 4+ letters that isn't a known word, and is
+   one letter off one known word (two for long words), becomes that word.
+   Ambiguous or far-off words are left alone, so colour names survive. */
+function correctLabelText(text, vocab){
+  const lex = labelLexicon(vocab);
+  const byLen = new Map();
+  lex.forEach(w => { if(!byLen.has(w.length)) byLen.set(w.length, []); byLen.get(w.length).push(w); });
+  return String(text||'').replace(/[A-Za-zÀ-ÿ]{4,}/g, tok => {
+    const n = labelNorm(tok).replace(/ /g,'');
+    if(!n || lex.has(n)) return tok;
+    const maxD = n.length >= 7 ? 2 : 1;
+    let best = null, bestD = 99, tie = false;
+    for(let L = n.length - maxD; L <= n.length + maxD; L++){
+      for(const w of byLen.get(L) || []){
+        const d = levenshtein(n, w);
+        if(d < bestD){ best = w; bestD = d; tie = false; } else if(d === bestD && w !== best) tie = true;
+      }
+    }
+    if(!best || bestD > maxD || tie) return tok;
+    return tok[0] === tok[0].toUpperCase() ? best[0].toUpperCase() + best.slice(1) : best;
+  });
+}
+const FOREIGN_FIBER_WORDS = new Set(FIBER_VOCAB.flatMap(([, keys]) => keys).filter(k => !k.includes(' ') && !ENGLISH_FIBERS.has(k)));
+function fiberCanonical(phrase){
+  const words = labelNorm(phrase).split(' ');
+  // English only if no word is a foreign fiber word ("Lana Merino" isn't English).
+  const english = words.some(w => ENGLISH_FIBERS.has(w)) && !words.some(w => FOREIGN_FIBER_WORDS.has(w));
+  for(const [name, keys] of FIBER_VOCAB) if(keys.some(k => k.includes(' ') ? labelNorm(phrase).includes(k) : words.includes(k))) return { name, english };
+  // A word cut off at the label's edge ("Cot", "Merin"): if every fiber word it
+  // could be the start of is the same fiber, it's that fiber.
+  for(const w of words){
+    if(w.length < 3) continue;
+    const names = new Set(FIBER_VOCAB.filter(([, keys]) => keys.some(k => !k.includes(' ') && k.length > w.length && k.startsWith(w))).map(([n]) => n));
+    if(names.size === 1){ const name = [...names][0]; return { name, english: false }; }
+  }
+  // One OCR slip in a longer fiber word ("Woo!", "Acrylc", "Cottom").
+  for(const [name, keys] of FIBER_VOCAB) if(keys.some(k => k.length >= 4 && words.some(w => w.length >= 3 && Math.abs(w.length - k.length) <= 1 && levenshtein(w, k) <= 1))) return { name, english: false };
+  return null;
+}
+/* Pure: "65% Wool 35% Alpaca / 65% Laine 35% Alpaga" → "65% Wool, 35% Alpaca".
+   Translations of the same blend are dropped; an English phrase is kept as
+   written ("100% Superwash Merino Wool"), others become the English name. */
+function parseLabelFiber(text){
+  const out = [];
+  let total = 0;
+  // Keep the phrase up to its last fiber/qualifier word: "Mercerized Cotton Ee EL" → "Mercerized Cotton".
+  const tidy = phrase => {
+    const words = phrase.replace(/^[^A-Za-zÀ-ÿ]+/, '').split(/\s+/).filter(Boolean);
+    let last = -1;
+    words.forEach((w, i) => { const n = labelNorm(w); if(FIBER_QUALIFIERS.includes(n) || FIBER_VOCAB.some(([, keys]) => keys.includes(n))) last = i; });
+    return last < 0 ? words.join(' ') : words.slice(0, last + 1).join(' ');
+  };
+  const take = (pct, rawPhrase, after) => {
+    if(pct > 100) return;
+    const phrase = tidy(rawPhrase.replace(/\s+/g,' ').trim());
+    const c = fiberCanonical(phrase);
+    if(!c) return;
+    let label = c.english ? phrase : null;
+    // "100% Baumwolle / Cotton": the English word may follow the slash.
+    if(!c.english && after){
+      const alt = after.match(/^\s*\/\s*([A-Za-z][A-Za-z ]{2,25})/);
+      const ac = alt && fiberCanonical(tidy(alt[1]));
+      if(ac && ac.english && ac.name === c.name) label = tidy(alt[1]);
+    }
+    const dup = out.find(f => f.name === c.name && (f.pct === pct || !pct || !f.pct));
+    if(dup){
+      // The same fiber again, in another language: keep the English wording.
+      if(label && !dup.english){ dup.label = label; dup.english = true; }
+      if(!dup.pct && pct){ dup.pct = pct; total += pct; }
+      return;
+    }
+    // A misread percentage that overshoots 100 ("60% Silk 46% Merino"): the rest.
+    if(total + pct > 100){ if(total < 100 && total + pct - 100 <= 10) pct = 100 - total; else return; }
+    out.push({ pct, name: c.name, label: label || c.name, english: !!label });
+    total += pct;
+  };
+  for(const line of String(text).split('\n')){
+    const before = out.length;
+    let m;
+    // "Mulberry Silk 60%, Merino Wool 35%": the line names a fiber before its first percentage.
+    // Name-first when the line ends on a percentage ("Wool 85%, Acrylic 15%"), or the
+    // words right before the first one are a fiber and the words after aren't.
+    const firstPct = line.search(/\d{1,3}\s*%/);
+    const pm = firstPct >= 0 ? line.slice(firstPct).match(/^\d{1,3}\s*%\W*/) : null;
+    const lastWords = s => s.trim().split(/\s+/).slice(-2).join(' ');
+    const nameFirst = firstPct > 0 && (/\d\s*%[^A-Za-zÀ-ÿ\d]*$/.test(line.trim())
+      || (!!fiberCanonical(lastWords(line.slice(0, firstPct))) && !fiberCanonical(line.slice(firstPct + pm[0].length).split(/\s+/).slice(0, 2).join(' '))));
+    if(!nameFirst){
+      const re = /(\d{1,3})\s*%\s*([^%\d\/|,;()]{2,40})/g;
+      while((m = re.exec(line))) take(Number(m[1]), m[2], line.slice(m.index + m[0].length, m.index + m[0].length + 30));
+    }
+    if(out.length === before){
+      const re2 = /([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ ]{1,40}?)\s*(\d{1,3})\s*%/g;
+      while((m = re2.exec(line))) take(Number(m[2]), m[1].replace(/^.*?:\s*/,''), '');
     }
   }
+  // A blend with one percentage lost to OCR ("0% Acrylic / 20% Wool"): it's the rest.
+  const lost = out.filter(f => !f.pct);
+  if(lost.length === 1 && out.length > 1 && total < 100) lost[0].pct = 100 - total;
+  for(const f of lost) if(!f.pct) out.splice(out.indexOf(f), 1);
+  if(out.length) return out.map(f => `${f.pct}% ${f.label.replace(/\s+(?:and|und|et|y|e)$/i,'')}`).join(', ');
+  const lone = fiberCanonical(text);
+  return lone ? lone.name : null;
+}
+/* Pure: weight category from a label. The CYC symbol ("(4) MEDIUM") wins;
+   then names, longest first so "super bulky" isn't read as "bulky"; then ply. */
+function parseLabelWeight(text, ignore){
+  // The yarn's own name ("Tweed DK") isn't the label stating its weight.
+  (ignore||[]).filter(Boolean).forEach(n => { text = text.replace(new RegExp(n.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'), 'gi'), ' '); });
+  const t = ' ' + labelNorm(text) + ' ';
+  const stated = text.match(/(?:yarn\s*weight|weight\s*category)\s*[:\-]?\s*([A-Za-z][A-Za-z ]{1,20})|\b([A-Za-z]+(?:\s+[A-Za-z]+)?)\s+weight\b/i);
+  if(stated){
+    const w = parseLabelWeight(stated[1] || stated[2]);
+    if(w) return w;
+  }
+  const cyc = text.match(/\(?\b([0-7])\)?\s*[-–]?\s*(lace|super\s*fine|fine|light|medium|bulky|super\s*bulky|jumbo)\b/i);
+  if(cyc) return ['Lace','Fingering','Sport','DK','Worsted','Bulky','Super Bulky','Super Bulky'][Number(cyc[1])];
+  const names = [['Super Bulky',['super bulky','super chunky','jumbo','roving']],['DK',['light worsted','double knitting','double knit','dk']],
+    ['Bulky',['bulky','chunky']],['Worsted',['worsted','aran','afghan']],['Sport',['sport']],['Fingering',['fingering','sock weight','sock yarn','super fine']],['Lace',['lace weight','lace','cobweb']]];
+  for(const [cat, keys] of names) if(keys.some(k => t.includes(' ' + k + ' '))) return cat;
+  const ply = text.match(/\b(\d{1,2})\s*-?\s*ply\b/i);
+  if(ply){ const p = Number(ply[1]); return p <= 2 ? 'Lace' : p <= 4 ? 'Fingering' : p === 5 ? 'Sport' : p === 8 ? 'DK' : p <= 12 ? 'Worsted' : 'Bulky'; }
+  return null;
+}
+/* Fix the usual OCR digit slips inside numbers next to a unit:
+   "1OO g" → "100 g", "22O yds" → "220 yds", "l00" → "100". */
+function fixOcrDigits(text){
+  return text.replace(/\b[0-9OoIl|]{2,5}(?=\s*(?:g|gr|grams?|m|meters?|metres?|yds?|yards?|oz)\b)/g, s => /\d/.test(s) ? s.replace(/[Oo]/g,'0').replace(/[Il|]/g,'1') : s);
+}
+/* =================================================================
+   Label OCR parsing — turns raw OCR text into confident field guesses.
+   Philosophy: only fill a field when reasonably confident; a blank beats a
+   confident-wrong guess. Names are reconciled against known vocabulary
+   (preset and stash brands/lines, fiber and weight terms in several
+   languages) with small OCR errors allowed. The photo → text step is
+   tesseract.js (readYarnLabel); this is the "make sense of it" step.
+================================================================= */
+function parseYarnLabel(rawText, vocab){
+  const V = vocab || labelVocabulary();
+  let text = String(rawText || '').replace(/[“”„]/g,'"').replace(/[‘’]/g,"'").replace(/[–—]/g,'-');
+  text = text.replace(/(\d)\s*0z\b/gi, '$1 oz')                 // "3.5 0z" → oz
+             .replace(/\bca(?=[lI|\d])/g, 'ca ');                 // "cal00m" → "ca l00m"
+  text = fixOcrDigits(correctLabelText(text, V));
+  const norm = labelNorm(text);
+  const out = { brand:null, line:null, fiber:null, weightCategory:null, skeinYardage:null, skeinWeightGrams:null, colorway:null, dyeLot:null };
 
-  // --- Weight category: match known weight words (+ common synonyms) ---
-  const weightSynonyms = {
-    'Lace':['lace','2 ply','2-ply'],
-    'Fingering':['fingering','sock','4 ply','4-ply','super fine'],
-    'Sport':['sport'],
-    'DK':['dk','double knit','light worsted'],
-    'Worsted':['worsted','afghan','medium','aran','10 ply','10-ply'],
-    'Bulky':['bulky','chunky','12 ply'],
-    'Super Bulky':['super bulky','super chunky','roving']
-  };
-  for(const [cat,syns] of Object.entries(weightSynonyms)){
-    if(syns.some(s=>lower.includes(s))){ out.weightCategory = cat; break; }
+  // --- Brand and line: best fuzzy match; a line confirms its brand ---
+  let best = null;
+  for(const v of V){
+    const bs = fuzzyFind(v.brand, norm);
+    // Longest line names first, so "Wool-Ease Thick & Quick" beats "Wool-Ease".
+    const lines = [...v.lines].sort((a,b) => labelNorm(b).length - labelNorm(a).length);
+    let ls = 0, line = null;
+    for(const l of lines){ const sc = fuzzyFind(l, norm); if(sc > ls){ ls = sc; line = l; } if(sc === 1) break; }
+    // A line name on its own (e.g. "220") is too weak without its brand.
+    const score = bs ? bs + (ls ? ls : 0) : 0;
+    if(score && (!best || score > best.score)) best = { score, brand: v.brand, line: ls ? line : null };
+  }
+  if(best){ out.brand = best.brand; out.line = best.line; }
+
+  // The label's own statement first; the yarn's name ("Tweed DK") only as a fallback.
+  out.weightCategory = parseLabelWeight(text, [out.line]) || (out.line ? parseLabelWeight(out.line) : null);
+  out.fiber = parseLabelFiber(text);
+
+  // --- Length: yards if given, else metres → yards. Plausible skeins only. ---
+  const num = s => Number(String(s).replace(/,(?=\d{3}\b)/g,'').replace(',', '.'));
+  const yd = [...text.matchAll(/(\d[\d,.]*)\s*(?:yds?|yards?|yardage)\b/gi)].map(m => num(m[1])).find(n => n >= 10 && n <= 3000);
+  const mt = [...text.matchAll(/(\d[\d,.]*)\s*(?:m|meters?|metres?|mtrs?|mts?)\b/gi)].map(m => num(m[1])).find(n => n >= 10 && n <= 3000);
+  // The unit can be unreadable ("Largo 800 mt5"): a number right after a length
+  // keyword is metres (yards after "yardage"/"yards").
+  const kw = re => { const m = text.match(re); return m ? num(m[1]) : null; };
+  const kwYd = kw(/\b(?:yardage|yards)\b\s*[:=]?\s*(\d[\d,.]*)/i);
+  const kwM = kw(/\b(?:length|lauflange|lauflänge|lange|länge|largo|lunghezza|longueur|meterage|metrage)\b\s*[:=/]?\s*(?:[a-z]+\s*[:=]?\s*)?(\d[\d,.]*)/i);
+  if(yd) out.skeinYardage = Math.round(yd);
+  else if(mt) out.skeinYardage = Math.round(mt * YD_PER_M);
+  else if(kwYd && kwYd >= 10 && kwYd <= 3000) out.skeinYardage = Math.round(kwYd);
+  else if(kwM && kwM >= 10 && kwM <= 3000) out.skeinYardage = Math.round(kwM * YD_PER_M);
+
+  // --- Skein weight: grams, else ounces ---
+  // Common skein weights, for undoing "g" misread as "9" ("509g", "100 9").
+  const SKEIN_G = [10, 20, 25, 40, 50, 100, 150, 200, 250];
+  let g = [...text.matchAll(/(\d[\d,.]*)\s*(?:g|gr|grs|grams?|grammes?)(?:\b|(?=\d))/gi)].map(m => num(m[1])).map(n => (n > 100 && String(n).endsWith('9') && SKEIN_G.includes(Math.floor(n / 10))) ? Math.floor(n / 10) : n).find(n => n >= 5 && n <= 1000);
+  if(!g){ const m9 = text.match(/\b(\d{2,3})\s+9\b(?=\s*(?:[A-Za-z\/=(]|$))/m); if(m9 && SKEIN_G.includes(Number(m9[1]))) g = Number(m9[1]); }
+  const oz = [...text.matchAll(/(\d+(?:[.,]\d+)?)\s*(?:oz|ounces?)\b/gi)].map(m => num(m[1])).find(n => n > 0 && n <= 35);
+  // Likewise "Peso 25 ar" / "Net wt 100": a weight keyword then a number.
+  const kwG = (() => { const m = text.match(/\b(?:peso|net\s*wt|netto|nettogewicht|gewicht|poids|weight)\b\.?\s*[:=]?\s*(\d{1,4})\b/i); return m ? Number(m[1]) : null; })();
+  if(g) out.skeinWeightGrams = Math.round(g);
+  else if(oz) out.skeinWeightGrams = Math.round(oz * 28.35);
+  else if(kwG && kwG >= 5 && kwG <= 1000) out.skeinWeightGrams = kwG;
+
+  // --- Dye lot: the first lot-like word followed by a code with a digit ---
+  // (Keyword and value are matched separately so "…dye lot to dye lot / Lot: 6342"
+  // can't use up the second "Lot" as a value.)
+  for(const k of text.matchAll(/\b(?:dye\s*lot|lot|batch|partie|bain|lote|charge|farbpartie|lotto)\b/gi)){
+    const m = text.slice(k.index + k[0].length).match(/^\s*(?:no\.?|nr\.?|n[°º*]|#)?\s*[:;.#]?\s*([A-Z0-9][A-Z0-9-]{1,11})\b/i);
+    if(m && /\d/.test(m[1])){ out.dyeLot = m[1]; break; }
   }
 
-  // --- Fiber: only accept if a known fiber term appears (reuse categorizer) ---
-  const fiberTerms = ['wool','merino','alpaca','cotton','acrylic','silk','linen','flax','mohair','cashmere','bamboo','nylon','polyester','superwash'];
-  if(fiberTerms.some(t=>lower.includes(t))){
-    // Try to grab the actual fiber phrase (e.g. "100% Superwash Merino Wool").
-    const fiberLine = lines.find(l=>/%|\bwool\b|\bcotton\b|\bacrylic\b|\balpaca\b|\bmerino\b/i.test(l) && l.length<60);
-    out.fiber = fiberLine || null;
+  // --- Colour: needs a separator or a number, so "Colours may vary" isn't one ---
+  for(const k of text.matchAll(/\b(?:colou?rway|colou?r|col|shade|farbe|coloris|couleur|nuance|tono|colore|kleur)\b/gi)){
+    const m = text.slice(k.index + k[0].length).match(/^\.?(?:\s*\/\s*[A-Za-z]+\.?)?\s*(?:(?:no|nr|n°|#)\.?\s*:?\s*|:\s*|(?=\d))([A-Za-z0-9][A-Za-z0-9 '&-]{0,28})/i);
+    if(!m) continue;
+    if(/^(?:may|can|might|will|varies|vary|fast|card)\b/i.test(m[1])) continue;
+    const v = colourValue(m[1]);
+    if(v){ out.colorway = v; break; }
   }
 
-  // --- Yardage: look for "### yd/yds/yards" or "### m/meters" ---
-  const ydMatch = text.match(/(\d{2,4})\s*(?:yd|yds|yards|yardage)/i);
-  const mMatch = text.match(/(\d{2,4})\s*(?:m|meter|meters|metres)\b/i);
-  if(ydMatch) out.skeinYardage = Number(ydMatch[1]);
-  else if(mMatch) out.skeinYardage = Math.round(Number(mMatch[1]) * 1.0936); // m→yd
-
-  // --- Skein weight: "### g/grams/gr" or "### oz" ---
-  const gMatch = text.match(/(\d{2,4})\s*(?:g|gr|grams|gramme)\b/i);
-  const ozMatch = text.match(/([\d.]+)\s*(?:oz|ounce)/i);
-  if(gMatch) out.skeinWeightGrams = Number(gMatch[1]);
-  else if(ozMatch) out.skeinWeightGrams = Math.round(Number(ozMatch[1]) * 28.35); // oz→g
-
-  // --- Dye lot: "lot ####" or "dye lot: ####" ---
-  const lotMatch = text.match(/(?:dye\s*lot|lot|batch)\s*[:#]?\s*([A-Za-z0-9-]{2,12})/i);
-  if(lotMatch) out.dyeLot = lotMatch[1];
-
-  // --- Colorway / color number: "color ###" or "colorway: ___" ---
-  const colorMatch = text.match(/(?:colou?rway|colou?r|shade)\s*[:#]?\s*([A-Za-z0-9 -]{1,24})/i);
-  if(colorMatch) out.colorway = colorMatch[1].trim();
-
-  // Confidence: how many fields did we actually resolve?
   out._fieldsFound = Object.entries(out).filter(([k,v])=>k[0]!=='_' && v!=null && v!=='').length;
   return out;
+}
+
+/* Pure: the colour itself out of what follows "Colour": an optional number
+   then up to three capitalised words ("0336 Warm Brown"), stopping at the
+   next label keyword or OCR crumbs ("Warm Brown Sit at oa", "001 ate"). */
+function colourValue(raw){
+  const stop = new Set([...LABEL_PHRASES.length, ...LABEL_PHRASES.weight, ...LABEL_PHRASES.lot, ...LABEL_PHRASES.colour, ...LABEL_PHRASES.yarnWeight, ...LABEL_PHRASES.other, 'composition','dry','wash']);
+  const toks = String(raw).trim().split(/\s+/);
+  const out = [];
+  let i = 0;
+  if(/^\d[\dA-Z-]*$/i.test(toks[0]) && /\d/.test(toks[0])) out.push(toks[i++]);
+  let words = 0;
+  for(; i < toks.length && words < 3; i++){
+    const t = toks[i], n = labelNorm(t);
+    if(stop.has(n) || !/^[A-ZÀ-Ý][a-zà-ÿ'&-]{2,}$|^[A-ZÀ-Ý]{3,}$/.test(t)) break;
+    // A short capitalised crumb after a name ("Brown Sit") is likely noise.
+    if(words && t.length <= 3 && !/^[A-Z]{3}$/.test(t)) break;
+    out.push(t); words++;
+  }
+  return out.join(' ') || null;
+}
+/* Pure: contrast settings for a label photo from its grey levels (0–255):
+   stretch the 2nd–98th percentile to full range, and invert light-on-dark
+   labels (OCR reads dark text on light best). */
+function ocrLevels(grey){
+  const hist = new Array(256).fill(0);
+  for(const v of grey) hist[v]++;
+  const n = grey.length || 1;
+  const pct = p => { let acc = 0; for(let i = 0; i < 256; i++){ acc += hist[i]; if(acc >= n * p) return i; } return 255; };
+  const lo = pct(0.02), hi = pct(0.98), median = pct(0.5);
+  return { lo, hi: Math.max(hi, lo + 1), invert: median < 110 };
+}
+/* Pure: 3×3 median filter on greyscale pixels — removes speckle noise
+   (dust, JPEG grain, fabric texture) while keeping letter edges. */
+function medianFilter3(src, w, h){
+  const out = new Uint8Array(src.length);
+  const win = new Array(9);
+  for(let y = 0; y < h; y++){
+    for(let x = 0; x < w; x++){
+      let k = 0;
+      for(let dy = -1; dy <= 1; dy++){
+        const yy = Math.min(h - 1, Math.max(0, y + dy));
+        for(let dx = -1; dx <= 1; dx++) win[k++] = src[yy * w + Math.min(w - 1, Math.max(0, x + dx))];
+      }
+      win.sort((a,b) => a - b);
+      out[y * w + x] = win[4];
+    }
+  }
+  return out;
+}
+/* Pure: even out lighting (a shadow across the label, a dim corner) by
+   dividing each pixel by the local background — a wide box blur, done with
+   running sums so it's fast. Dark text on light paper keeps its contrast
+   wherever it sits. */
+function flattenBackground(src, w, h, r){
+  const tmp = new Float32Array(src.length), bg = new Float32Array(src.length);
+  for(let y = 0; y < h; y++){            // horizontal pass
+    let sum = 0, n = 0;
+    for(let x = -r; x <= r; x++) if(x >= 0 && x < w){ sum += src[y*w + x]; n++; }
+    for(let x = 0; x < w; x++){
+      tmp[y*w + x] = sum / n;
+      const out = x - r, inn = x + r + 1;
+      if(out >= 0){ sum -= src[y*w + out]; n--; }
+      if(inn < w){ sum += src[y*w + inn]; n++; }
+    }
+  }
+  for(let x = 0; x < w; x++){            // vertical pass
+    let sum = 0, n = 0;
+    for(let y = -r; y <= r; y++) if(y >= 0 && y < h){ sum += tmp[y*w + x]; n++; }
+    for(let y = 0; y < h; y++){
+      bg[y*w + x] = sum / n;
+      const out = y - r, inn = y + r + 1;
+      if(out >= 0){ sum -= tmp[out*w + x]; n--; }
+      if(inn < h){ sum += tmp[inn*w + x]; n++; }
+    }
+  }
+  const out = new Uint8Array(src.length);
+  for(let p = 0; p < src.length; p++) out[p] = Math.max(0, Math.min(255, Math.round(src[p] / Math.max(1, bg[p]) * 235)));
+  return out;
+}
+/* Photo → canvas ready for OCR: sized so text is big enough (long side
+   ~1800 px, small photos are enlarged), greyscale, contrast stretched,
+   light-on-dark inverted. */
+async function prepareLabelImage(blob){
+  const bmp = await createImageBitmap(blob);
+  const k = Math.min(3, 1800 / Math.max(bmp.width, bmp.height));
+  const w = Math.max(1, Math.round(bmp.width * k)), h = Math.max(1, Math.round(bmp.height * k));
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const ctx = c.getContext('2d');
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(bmp, 0, 0, w, h);
+  const img = ctx.getImageData(0, 0, w, h), d = img.data;
+  const raw = new Uint8Array(w * h);
+  for(let i = 0, p = 0; i < d.length; i += 4, p++) raw[p] = Math.round(0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2]);
+  let grey = medianFilter3(raw, w, h);   // speckle out first
+  // Light-on-dark labels are flipped before the lighting is evened out.
+  if(ocrLevels(grey).invert) for(let p = 0; p < grey.length; p++) grey[p] = 255 - grey[p];
+  grey = flattenBackground(grey, w, h, Math.max(15, Math.round(Math.max(w, h) / 25)));
+  const { lo, hi } = ocrLevels(grey);
+  const scale = 255 / (hi - lo);
+  for(let p = 0, i = 0; p < grey.length; p++, i += 4){
+    const v = Math.max(0, Math.min(255, (grey[p] - lo) * scale));
+    d[i] = d[i+1] = d[i+2] = v; d[i+3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  return c;
+}
+/* Photo → parsed label. Reads the prepared image; if that finds little
+   (curved or scattered label text), reads again treating the text as
+   scattered words, and keeps whichever read found more. */
+async function readYarnLabel(file, onProgress){
+  await ensureTesseractLoaded();
+  const usable = await toRenderableImageBlob(file);
+  const canvas = await prepareLabelImage(usable);
+  const worker = await Tesseract.createWorker('eng', 1, { logger: m => { if(onProgress && m.status === 'recognizing text') onProgress(m.progress); } });
+  try{
+    const vocab = labelVocabulary();
+    const read = async img => { const { data } = await worker.recognize(img); const p = parseYarnLabel(data.text || '', vocab); p._text = data.text; return p; };
+    let parsed = await read(canvas);
+    // Weak read: try the untouched photo, then scattered-text mode; keep the best.
+    if(parsed._fieldsFound < 5){
+      const plain = await read(usable);
+      if(plain._fieldsFound > parsed._fieldsFound) parsed = plain;
+    }
+    if(parsed._fieldsFound < 4){
+      await worker.setParameters({ tessedit_pageseg_mode: '11' });   // sparse text
+      const sparse = await read(canvas);
+      if(sparse._fieldsFound > parsed._fieldsFound) parsed = sparse;
+    }
+    return parsed;
+  } finally {
+    worker.terminate();
+  }
 }
 
 /* Icons (minimal hand-drawn line icons) */
@@ -1016,6 +1408,8 @@ function renderSettingsSheet(){
         </div>
         <button onclick="window.FB.signOutUser()">${ICONS.reset}<span>Sign out</span></button>
         <button onclick="closeSettings(); exportStash('json');">${ICONS.package}<span>Back up my data (JSON)</span></button>
+        <button onclick="document.getElementById('wg-restore-input').click()">${ICONS.upload}<span>Restore from a backup</span></button>
+        <input type="file" id="wg-restore-input" accept="application/json,.json" style="display:none;" onchange="restoreBackupFile(this.files[0]); closeSettings(); this.value='';" />
         <button onclick="closeSettings(); exportStash('csv');">${ICONS.package}<span>Export stash (CSV)</span></button>
         <button onclick="closeSettings(); resetAll();" class="danger-text">${ICONS.trash}<span>Clear my data</span></button>
         <div class="sheet-divider"></div>
@@ -1137,7 +1531,7 @@ function openTipJar(){
   </div>`;
   const bd = document.getElementById('wg-modal-bd');
   requestAnimationFrame(()=> bd.classList.add('open'));
-  const close = ()=>{ bd.classList.remove('open'); setTimeout(()=>{ root.innerHTML=''; }, 160); };
+  const close = ()=>{ bd.classList.remove('open'); setTimeout(()=>{ bd.remove(); }, 160); };
   document.getElementById('tip-close').onclick = close;
   bd.onclick = (e)=>{ if(e.target===bd) close(); };
 }
@@ -1161,7 +1555,7 @@ function openAbout(){
   </div>`;
   const bd = document.getElementById('wg-modal-bd');
   requestAnimationFrame(()=> bd.classList.add('open'));
-  const close = ()=>{ bd.classList.remove('open'); setTimeout(()=>{ root.innerHTML=''; }, 160); };
+  const close = ()=>{ bd.classList.remove('open'); setTimeout(()=>{ bd.remove(); }, 160); };
   document.getElementById('about-close').onclick = close;
   bd.onclick = (e)=>{ if(e.target===bd) close(); };
 }
@@ -1180,7 +1574,7 @@ function openSupportForm(){
   </div>`;
   const bd = document.getElementById('wg-modal-bd');
   requestAnimationFrame(()=> bd.classList.add('open'));
-  const close = ()=>{ bd.classList.remove('open'); setTimeout(()=>{ root.innerHTML=''; }, 160); };
+  const close = ()=>{ bd.classList.remove('open'); setTimeout(()=>{ bd.remove(); }, 160); };
   document.getElementById('support-cancel').onclick = close;
   bd.onclick = (e)=>{ if(e.target===bd) close(); };
   document.getElementById('support-send').onclick = async ()=>{
@@ -1428,7 +1822,10 @@ function renderOverview(){
     ${statTile('In progress', s.wipCount)}
     ${statTile('Oldest WIP', s.oldestWipDays!=null ? s.oldestWipDays+'d' : '—')}
     ${statTile('Avg. time to finish', s.avgFinishDays!=null ? s.avgFinishDays+'d' : '—')}
+    ${STATE.patterns.length ? statTile('Patterns queued', STATE.patterns.filter(p=>p.status==='queued').length, `of ${STATE.patterns.length} saved`) : ''}
+    ${STATE.shoppingList.some(i=>!i.done) ? statTile('To buy', STATE.shoppingList.filter(i=>!i.done).length, 'on your shopping list') : ''}
   </div>
+  ${renderUpNext()}
   <div class="chart-grid">
     <div class="card chart-card">
       <p class="chart-title">Yarn owned by fiber (${unitLabel()})</p>
@@ -1446,6 +1843,38 @@ function renderOverview(){
     </div>`;
   }
   return html;
+}
+/* Pure: queued patterns, each with the free stash yarn that suits it best —
+   one with enough for at least the smallest size, else the one with most of
+   that weight. Patterns already being made (a Planned/WIP project) are left out. */
+function upNextPatterns(patterns, yarns, projects){
+  const active = new Set((projects||[]).filter(p => p.patternId && (p.status==='Planned' || p.status==='WIP')).map(p => p.patternId));
+  return (patterns||[]).filter(p => p.status==='queued' && !active.has(p.id)).map(p => {
+    const r = patternYardageRange(p);
+    const pool = (yarns||[]).filter(y => p.weightCategory && y.weightCategory===p.weightCategory && yarnStatus(y)!=='allocated' && (Number(y.yardageRemaining)||0) > 0)
+      .sort((a,b) => (Number(b.yardageRemaining)||0) - (Number(a.yardageRemaining)||0));
+    const best = pool[0] || null;
+    const have = best ? Number(best.yardageRemaining)||0 : 0;
+    const ready = !!(r && best && have >= r.min);
+    return { pattern: p, yarn: best, ready, covers: ready && r.count ? patternSizesCovered(p.sizes, have) : null, short: r && !ready ? Math.ceil(r.min - have) : null };
+  }).sort((a,b) => (b.ready - a.ready) || a.pattern.name.localeCompare(b.pattern.name));
+}
+function renderUpNext(){
+  const list = upNextPatterns(STATE.patterns, STATE.yarns, STATE.projects);
+  if(!list.length) return '';
+  return `<div class="card up-next">
+    <p class="chart-title">Up next from your queue</p>
+    ${list.slice(0,5).map(m => `<div class="up-next-row">
+      <button type="button" class="pattern-inline-link" onclick="openPatternInLibrary('${m.pattern.id}')">${ICONS.book} ${esc(m.pattern.name)}</button>
+      <span class="note">${m.ready
+        ? `<span class="ok-text">ready</span> — ${esc(yarnDisplayName(m.yarn))}${m.covers ? ` (${esc(m.covers)})` : ''}`
+        : m.short != null ? (m.yarn ? `${toDisplayLength(m.short).toLocaleString()} ${unitLabel()} short` : `no free ${esc(m.pattern.weightCategory||'')} yarn`) : 'add yardage to check your stash'}</span>
+      ${STATE.online ? (m.ready
+        ? `<button class="btn btn-ghost btn-small" onclick="startProjectFromPattern('${m.pattern.id}')">${ICONS.sparkles} Start</button>`
+        : m.short != null ? `<button class="btn btn-ghost btn-small" onclick="shopForPattern('${m.pattern.id}')">${ICONS.cart} Shop</button>` : '') : ''}
+    </div>`).join('')}
+    ${list.length > 5 ? `<p class="note" style="margin:6px 0 0;">…and ${list.length-5} more in your queue</p>` : ''}
+  </div>`;
 }
 function statTile(label,value,sub){
   return `<div class="card stat-tile"><p class="label">${esc(label)}</p><p class="value">${esc(value)}</p>${sub?`<p class="sub">${esc(sub)}</p>`:''}</div>`;
@@ -1793,33 +2222,29 @@ async function processLabelScan(file){
   }
   setStatus('Reading label…');
   try{
-    const usable = await toRenderableImageBlob(file);
-    const { data } = await Tesseract.recognize(usable, 'eng', {
-      logger: m => { if(m.status==='recognizing text') setStatus(`Reading label… ${Math.round(m.progress*100)}%`); }
-    });
-    const parsed = parseYarnLabel(data.text || '');
+    const parsed = await readYarnLabel(file, p => setStatus(`Reading label… ${Math.round(p*100)}%`));
     if(parsed._fieldsFound === 0){
       setStatus('');
       wgToast("Couldn't read much from that photo — try a flatter, brighter shot, or enter details manually.", "error");
       return;
     }
-    const fillIfEmpty = (id, val)=>{
-      if(val==null || val==='') return false;
+    const filled = [];
+    const mark = el => { el.classList.add('from-pdf'); el.addEventListener('input', () => el.classList.remove('from-pdf'), { once:true }); el.addEventListener('change', () => el.classList.remove('from-pdf'), { once:true }); };
+    const fillIfEmpty = (id, val, label)=>{
+      if(val==null || val==='') return;
       const el = document.getElementById(id);
-      if(el && !el.value){ el.value = val; return true; }
-      return false;
+      if(el && !String(el.value).trim()){ el.value = val; mark(el); filled.push(label); }
     };
-    let filled = 0;
-    if(parsed.brand && fillIfEmpty('yf-brand', parsed.brand)) filled++;
-    if(parsed.line && fillIfEmpty('yf-line', parsed.line)) filled++;
-    if(parsed.fiber && fillIfEmpty('yf-fiber', parsed.fiber)) filled++;
-    if(parsed.colorway && fillIfEmpty('yf-colorway', parsed.colorway)) filled++;
-    if(parsed.dyeLot && fillIfEmpty('yf-dyelot', parsed.dyeLot)) filled++;
-    if(parsed.skeinYardage && fillIfEmpty('yf-skeinyardage', toDisplayLength(parsed.skeinYardage))) filled++;
-    if(parsed.skeinWeightGrams && fillIfEmpty('yf-skeinweight', parsed.skeinWeightGrams)) filled++;
-    if(parsed.weightCategory){ const el=document.getElementById('yf-weightcat'); if(el){ el.value=parsed.weightCategory; filled++; } }
+    fillIfEmpty('yf-brand', parsed.brand, 'brand');
+    fillIfEmpty('yf-line', parsed.line, 'name');
+    fillIfEmpty('yf-fiber', parsed.fiber, 'fiber');
+    fillIfEmpty('yf-colorway', parsed.colorway, 'colorway');
+    fillIfEmpty('yf-dyelot', parsed.dyeLot, 'dye lot');
+    fillIfEmpty('yf-skeinyardage', parsed.skeinYardage ? toDisplayLength(parsed.skeinYardage) : null, 'skein length');
+    fillIfEmpty('yf-skeinweight', parsed.skeinWeightGrams, 'skein weight');
+    if(parsed.weightCategory){ const el=document.getElementById('yf-weightcat'); if(el && el.value !== parsed.weightCategory){ el.value=parsed.weightCategory; mark(el); filled.push('weight'); } }
     setStatus('');
-    wgToast(filled ? `Prefilled ${filled} field${filled===1?'':'s'} — please double-check before saving.` : 'Read the label, but those fields were already filled.', filled?'success':undefined);
+    wgToast(filled.length ? `Read from the label: ${filled.join(', ')} — tinted fields, please double-check.` : 'Read the label, but those fields were already filled.', filled.length?'success':undefined);
   }catch(err){
     console.error('OCR failed', err);
     setStatus('');
@@ -2075,7 +2500,13 @@ function handleSaveYarn(e){
     const yarn = { id: uid(), ...fields, scraps, status:'available', allocatedTo:null, dateAdded: todayStr(), updatedAt: new Date().toISOString() };
     yarn.yardageRemaining = yarnTotalYardage(yarn) + newScrapYd;
     STATE.yarns.push(yarn);
+    // Logged from a bought shopping item: it comes off the list.
+    if(pendingShoppingToStashId){
+      STATE.shoppingList = STATE.shoppingList.filter(i=>i.id!==pendingShoppingToStashId);
+      wgToast('Added to your stash and taken off your shopping list.', 'success');
+    }
   }
+  pendingShoppingToStashId = null;
   persist();
   STATE.showYarnForm = false;
   STATE.editingYarnId = null;
@@ -2084,8 +2515,19 @@ function handleSaveYarn(e){
 }
 
 async function deleteYarn(id){
-  if(!(await wgConfirm('Remove this yarn from your stash? This cannot be undone.', {title:'Remove yarn', okLabel:'Remove', danger:true}))) return;
+  const inProjects = STATE.projects.filter(p=>(p.yarnIds||[]).includes(id));
+  const inPalettes = STATE.paletteSavedPalettes.filter(pl=>(pl.slots||[]).some(s=>s.yarnId===id) || pl.baseYarnId===id);
+  const where = [inProjects.length && `${inProjects.length} project${inProjects.length===1?'':'s'} (${inProjects.slice(0,3).map(p=>p.name).join(', ')}${inProjects.length>3?'…':''})`,
+    inPalettes.length && `${inPalettes.length} palette${inPalettes.length===1?'':'s'}`].filter(Boolean).join(' and ');
+  const msg = where
+    ? `This yarn is linked to ${where}. They'll keep their history, but the link to this yarn is removed. This cannot be undone.`
+    : 'Remove this yarn from your stash? This cannot be undone.';
+  if(!(await wgConfirm(msg, {title:'Remove yarn', okLabel:'Remove', danger:true}))) return;
   STATE.yarns = STATE.yarns.filter(y=>y.id!==id);
+  // Projects stop pointing at it (usage history stays for the stats).
+  STATE.projects = STATE.projects.map(p => (p.yarnIds||[]).includes(id) || (p.yarnRequired||[]).some(u=>u.yarnId===id)
+    ? { ...p, yarnIds: (p.yarnIds||[]).filter(x=>x!==id), yarnRequired: (p.yarnRequired||[]).filter(u=>u.yarnId!==id) } : p);
+  STATE.shoppingList = STATE.shoppingList.map(i => i.yarnId===id ? { ...i, yarnId:null } : i);
   persist();
   renderTab();
 }
@@ -2104,6 +2546,79 @@ function downloadFile(filename, text, mime){
   a.href = url; a.download = filename;
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(()=>URL.revokeObjectURL(url), 1000);
+}
+/* Restore from a JSON backup made by "Back up my data".
+   Two ways: add only what's missing (matched by id — nothing you have now is
+   changed or removed), or replace everything. Replacing first downloads a
+   backup of what's there now. Pattern files themselves aren't in a backup,
+   only links to them, so patterns whose files were deleted lose those files. */
+const BACKUP_KEYS = [['yarns','yarns'],['projects','projects'],['palettes','palettes'],['shoppingList','shopping list items'],['patterns','patterns']];
+const FIRESTORE_DOC_LIMIT = 1048576;   // bytes, one Firestore document
+// Pure: a parsed backup file → { ok, error?, data, exportedAt }
+function parseBackup(json){
+  if(!json || typeof json !== 'object' || Array.isArray(json)) return { ok:false, error:"This file isn't a Woolgather backup." };
+  if(json.app && json.app !== 'Woolgather') return { ok:false, error:"This file isn't a Woolgather backup." };
+  if(!BACKUP_KEYS.some(([k]) => Array.isArray(json[k]))) return { ok:false, error:"This backup has nothing in it to restore." };
+  const data = {};
+  for(const [k] of BACKUP_KEYS){
+    if(json[k] != null && !Array.isArray(json[k])) return { ok:false, error:`This backup looks damaged (${k} isn't a list).` };
+    data[k] = (json[k] || []).filter(x => x && typeof x === 'object');
+  }
+  return { ok:true, data, exportedAt: json.exportedAt || null };
+}
+// Pure: combine current data with a backup. mode 'merge' adds items whose id
+// isn't already there (items without an id are added unless an identical one
+// exists); 'replace' takes the backup as is. Returns { data, added }.
+function mergeBackup(current, backup, mode){
+  const data = {}, added = {};
+  for(const [k] of BACKUP_KEYS){
+    const cur = current[k] || [], incoming = backup[k] || [];
+    if(mode === 'replace'){ data[k] = incoming.map(x => ({ ...x })); added[k] = incoming.length; continue; }
+    const ids = new Set(cur.map(x => x.id).filter(Boolean));
+    const same = new Set(cur.filter(x => !x.id).map(x => JSON.stringify(x)));
+    const extra = incoming.filter(x => x.id ? !ids.has(x.id) : !same.has(JSON.stringify(x)));
+    data[k] = [...cur, ...extra.map(x => ({ ...x }))];
+    added[k] = extra.length;
+  }
+  return { data, added };
+}
+function currentBackupData(){
+  return { yarns: STATE.yarns, projects: STATE.projects, palettes: STATE.paletteSavedPalettes, shoppingList: STATE.shoppingList, patterns: STATE.patterns };
+}
+async function restoreBackupFile(file){
+  if(!file) return;
+  if(!STATE.online){ wgToast("You're offline — restoring needs a connection.", "error"); return; }
+  let parsed;
+  try{ parsed = parseBackup(JSON.parse(await file.text())); }
+  catch(e){ parsed = { ok:false, error:"This file isn't a Woolgather backup." }; }
+  if(!parsed.ok){ wgToast(parsed.error, 'error'); return; }
+  const count = d => BACKUP_KEYS.map(([k,l]) => `${(d[k]||[]).length} ${l}`).join(', ');
+  const when = parsed.exportedAt ? ` from ${new Date(parsed.exportedAt).toLocaleDateString()}` : '';
+  const merge = mergeBackup(currentBackupData(), parsed.data, 'merge');
+  const newCount = Object.values(merge.added).reduce((a,b)=>a+b, 0);
+  const mode = await wgChoose(`This backup${when} has ${count(parsed.data)}. You have ${count(currentBackupData())} now. Backups hold links to pattern files, not the files themselves.`, {
+    title: 'Restore from backup',
+    choices: [
+      { label: 'Add what’s missing', detail: newCount ? `Adds ${newCount} item${newCount===1?'':'s'} you don't have; nothing you have now changes` : 'Everything in it is already here', value: 'merge', primary: true },
+      { label: 'Replace everything', detail: 'Your current data is swapped for the backup (a copy of it downloads first)', value: 'replace', danger: true }
+    ]
+  });
+  if(!mode) return;
+  if(mode === 'merge' && !newCount){ wgToast('Nothing to add — everything in that backup is already here.'); return; }
+  const result = mode === 'merge' ? merge : mergeBackup(currentBackupData(), parsed.data, 'replace');
+  // All data lives in one Firestore document — refuse rather than fail to save.
+  const size = new Blob([JSON.stringify(result.data)]).size;
+  if(size > FIRESTORE_DOC_LIMIT * 0.95){ wgToast("That's too much to fit in your account at once — try 'Replace everything' instead, or contact support.", 'error'); return; }
+  if(mode === 'replace') exportStash('json');
+  cleanupOpenForms();
+  STATE.yarns = result.data.yarns.map(normalizeLegacyYarn);
+  STATE.projects = result.data.projects;
+  STATE.paletteSavedPalettes = result.data.palettes;
+  STATE.shoppingList = result.data.shoppingList;
+  STATE.patterns = result.data.patterns;
+  await persist();
+  render();
+  wgToast(mode === 'replace' ? 'Restored from your backup.' : `Added ${newCount} item${newCount===1?'':'s'} from your backup.`, 'success');
 }
 function exportStash(format){
   const stamp = todayStr();
@@ -2246,7 +2761,9 @@ function renderYarnCard(y){
   if(usedInProjects.length) usageBits.push(`${usedInProjects.length} project${usedInProjects.length===1?'':'s'}`);
   if(usedInPalettes.length) usageBits.push(`${usedInPalettes.length} palette${usedInPalettes.length===1?'':'s'}`);
   const usageLine = usageBits.length
-    ? `<p class="note" style="margin-top:8px; font-size:0.7rem;" title="${esc([...usedInProjects.map(p=>p.name),...usedInPalettes.map(p=>p.name)].join(', '))}">Used in ${usageBits.join(' · ')}</p>`
+    ? `<p class="note" style="margin-top:8px; font-size:0.7rem;" title="${esc([...usedInProjects.map(p=>p.name),...usedInPalettes.map(p=>p.name)].join(', '))}">Used in ${usedInProjects.length
+        ? usedInProjects.slice(0,3).map(p=>`<button type="button" class="pattern-inline-link" onclick="openProjectInList('${p.id}')">${esc(p.name)}</button>`).join(', ') + (usedInProjects.length>3 ? ` +${usedInProjects.length-3}` : '')
+        : ''}${usedInProjects.length && usedInPalettes.length ? ' · ' : ''}${usedInPalettes.length ? `${usedInPalettes.length} palette${usedInPalettes.length===1?'':'s'}` : ''}</p>`
     : '';
   return `<div class="card yarn-card">
     <div class="yarn-hole"></div>
@@ -2283,9 +2800,35 @@ function renderYarnCard(y){
       </button>
     </div>
     ${usageLine}
+    ${renderYarnPatternsLine(y)}
   </div>`;
 }
 
+/* Pure: library patterns this much of one yarn could make — same weight and
+   enough length for the single yardage or at least one size. Sorted with
+   queued patterns first. */
+function patternsForYarn(yarn, patterns){
+  const have = Number(yarn && yarn.yardageRemaining) || 0;
+  if(!yarn || !yarn.weightCategory || have <= 0) return [];
+  const rank = { queued:0, saved:1, made:2 };
+  return (patterns||[]).filter(p => p.weightCategory === yarn.weightCategory)
+    .map(p => {
+      const r = patternYardageRange(p);
+      if(!r || have < r.min) return null;
+      const covers = r.count ? patternSizesCovered(p.sizes, have) : null;
+      return { pattern: p, covers, all: have >= r.max };
+    }).filter(Boolean)
+    .sort((a,b) => (rank[a.pattern.status||'saved'] - rank[b.pattern.status||'saved']) || a.pattern.name.localeCompare(b.pattern.name));
+}
+function renderYarnPatternsLine(y){
+  if(yarnStatus(y)==='allocated') return '';   // already promised to a project
+  const list = patternsForYarn(y, STATE.patterns);
+  if(!list.length) return '';
+  return `<details class="note yarn-patterns"><summary>📖 Enough for ${list.length} pattern${list.length===1?'':'s'}</summary>
+    <ul>${list.slice(0,10).map(m => `<li><button type="button" class="pattern-inline-link" onclick="openPatternInLibrary('${m.pattern.id}')">${esc(m.pattern.name)}</button>${m.covers ? ` <span class="note">· ${m.all ? 'any size' : esc(m.covers)}</span>` : ''}${m.pattern.status==='queued' ? ' <span class="note">· queued</span>' : ''}</li>`).join('')}</ul>
+    ${list.length>10 ? `<span class="note">…and ${list.length-10} more</span>` : ''}
+  </details>`;
+}
 function renderYarnScrapsLine(y){
   const scraps = yarnScraps(y);
   if(!scraps.length) return '';
@@ -2349,6 +2892,7 @@ function renderProjects(){
    saved. Editing an *existing* project does not revert on cancel — yardage
    already recorded as used represents real-world consumption, not a draft. */
 function cleanupOpenForms(){
+  pendingShoppingToStashId = null;
   if(STATE.showProjectForm && STATE.editingProjectId && !STATE.projects.find(p=>p.id===STATE.editingProjectId)){
     let changed = false;
     STATE.yarns = STATE.yarns.map(y=>{
@@ -2917,10 +3461,11 @@ function handleSaveProject(e){
     links: pendingProjectLinks.map(l=>({ id:l.id, url:l.url, type:l.type, title:l.title, thumbnail:l.thumbnail }))
   };
   if(existing){
-    STATE.projects = STATE.projects.map(p => p.id===STATE.editingProjectId ? { ...p, ...fields, updatedAt: new Date().toISOString() } : p);
+    STATE.projects = STATE.projects.map(p => p.id===STATE.editingProjectId ? withStatusDates({ ...p, ...fields, updatedAt: new Date().toISOString() }) : p);
   } else {
-    STATE.projects.push({ id: STATE.editingProjectId, ...fields, createdAt: todayStr(), updatedAt: new Date().toISOString() });
+    STATE.projects.push(withStatusDates({ id: STATE.editingProjectId, ...fields, createdAt: todayStr(), updatedAt: new Date().toISOString() }));
   }
+  syncPatternStatusFromProject(STATE.projects.find(p=>p.id===STATE.editingProjectId));
   persist();
   STATE.showProjectForm = false;
   STATE.editingProjectId = null;
@@ -2942,15 +3487,53 @@ async function deleteProject(id){
   renderTab();
 }
 function updateProjectStatus(id, status){
-  STATE.projects = STATE.projects.map(p => p.id===id ? {...p, status} : p);
+  STATE.projects = STATE.projects.map(p => p.id===id ? withStatusDates({ ...p, status }) : p);
+  syncPatternStatusFromProject(STATE.projects.find(p=>p.id===id));
   persist();
   renderTab();
+}
+/* Finishing a project records today as its finish date if none is set, so
+   Showcase dates and "average time to finish" stay right. */
+function withStatusDates(p){
+  if(p.status === 'Finished' && !p.finishDate) return { ...p, finishDate: todayStr() };
+  return p;
+}
+/* Pure: what a pattern's status becomes when one of its projects changes —
+   only ever forward (saved → queued → made), never back. Frogged changes nothing. */
+function patternStatusForProject(patternStatus, projectStatus){
+  const order = { saved:0, queued:1, made:2 };
+  const want = projectStatus === 'Finished' ? 'made' : (projectStatus === 'Planned' || projectStatus === 'WIP') ? 'queued' : null;
+  const cur = patternStatus || 'saved';
+  return want && order[want] > order[cur] ? want : cur;
+}
+function syncPatternStatusFromProject(proj){
+  if(!proj || !proj.patternId) return;
+  const pat = STATE.patterns.find(p=>p.id===proj.patternId);
+  if(!pat) return;
+  const next = patternStatusForProject(pat.status, proj.status);
+  if(next === (pat.status||'saved')) return;
+  STATE.patterns = STATE.patterns.map(p => p.id===pat.id ? { ...p, status: next, updatedAt: new Date().toISOString() } : p);
+  wgToast(`${pat.name} is now "${patternStatusLabel(next)}" in your pattern library.`);
 }
 /* Duplicate a project — copies the PLAN (name, pattern, needle, gauge, linked
    yarns, per-yarn "need", counter setup) but resets PROGRESS: status back to
    Planned, no dates, no photos, and usage cleared (so it doesn't double-deduct
    stock or double-reference the original's uploaded photos). For remaking the
    same thing without re-entering everything. */
+/* Jump to a project's row on the Projects tab (from a yarn, pattern or
+   shopping item) and highlight it briefly. */
+function openProjectInList(id){
+  if(!STATE.projects.some(p=>p.id===id)) return;
+  STATE.projFilterStatus = 'All statuses';
+  switchTab('projects');
+  requestAnimationFrame(() => {
+    const row = document.getElementById('proj-' + id);
+    if(!row) return;
+    row.scrollIntoView({ behavior:'smooth', block:'center' });
+    row.classList.add('flash');
+    setTimeout(() => row.classList.remove('flash'), 1800);
+  });
+}
 function duplicateProject(id){
   const src = STATE.projects.find(p=>p.id===id);
   if(!src) return;
@@ -2996,7 +3579,7 @@ function renderProjectRow(p){
   const counterPanel = (counters.length && expanded)
     ? `<div class="counter-panel">${counters.map(c=>renderCounter(p.id, c)).join('')}</div>`
     : '';
-  return `<div class="project-row">
+  return `<div class="project-row" id="proj-${p.id}">
     <span class="status-dot" style="background:${STATUS_COLORS[p.status]}"></span>
     <div class="grow">
       <p class="project-name">${esc(p.name)}${p.patternName ? ` <span class="pattern">— ${p.patternId && STATE.patterns.some(pt=>pt.id===p.patternId) ? `<button type="button" class="pattern-inline-link" onclick="openPatternInLibrary('${p.patternId}')" title="Open in pattern library">${ICONS.book} ${esc(p.patternName)}</button>` : esc(p.patternName)}${p.patternSize ? ` · size ${esc(p.patternSize)}` : ''}</span>` : ''}</p>
@@ -3004,7 +3587,7 @@ function renderProjectRow(p){
         ${usedYarns.map(y=>`<span class="dot" style="background:${y.colorHex}" title="${esc(y.name)}"></span>`).join('')}
         ${garmentBadge ? `<span class="note">${esc(garmentBadge)}</span>` : ''}
         ${p.needleSize ? `<span class="note">🪡 ${esc(p.needleSize)}</span>` : ''}
-        ${p.gauge && (p.gauge.sts||p.gauge.rows) ? `<span class="note">📐 ${p.gauge.sts||'?'}×${p.gauge.rows||'?'}/${p.gauge.unit==='cm'?'10cm':'4in'}${p.gauge.stitchType?` ${esc(p.gauge.stitchType)}${p.gauge.terms==='uk'?' (UK)':''}`:''}</span>` : ''}
+        ${p.gauge && (p.gauge.sts||p.gauge.rows) ? `<span class="note">📐 ${p.gauge.sts||'?'}×${p.gauge.rows||'?'}/${p.gauge.unit==='cm'?'10cm':'4in'}${p.gauge.stitchType?` ${esc(p.gauge.stitchType)}${p.gauge.terms==='uk'?' (UK)':''}`:''}${renderGaugeVsPattern(p)}</span>` : ''}
         ${attachedPalette ? `<span class="note">${ICONS.palette} ${esc(attachedPalette.name)}</span>` : ''}
         ${gapBadge}
         ${counters.length ? `<span class="note">${counters.length} counter${counters.length===1?'':'s'}</span>` : ''}
@@ -3018,11 +3601,30 @@ function renderProjectRow(p){
       ${STATUSES.map(s=>`<option ${s===p.status?'selected':''}>${s}</option>`).join('')}
     </select>
     ${counterToggle}
-    ${gapInfo && gapInfo.gap>0 ? `<button class="del-btn" onclick="shopProjectGap('${p.id}')" aria-label="Add gap to shopping list" title="Add the ${Math.round(gapInfo.gap)} yd gap to your shopping list">${ICONS.cart}</button>` : ''}
+    ${gapInfo && gapInfo.gap>0 ? `<button class="del-btn" onclick="shopProjectGap('${p.id}')" aria-label="Add gap to shopping list" title="Add the ${toDisplayLength(gapInfo.gap)} ${unitLabel()} gap to your shopping list">${ICONS.cart}</button>` : ''}
     <button class="del-btn" onclick="duplicateProject('${p.id}')" aria-label="Duplicate project" title="Make a copy of this project">⧉</button>
     <button class="del-btn" onclick="showProjectForm('${p.id}')" aria-label="Edit project">${ICONS.pencil}</button>
     <button class="del-btn" onclick="deleteProject('${p.id}')" aria-label="Delete project">${ICONS.trash}</button>
   </div>`;
+}
+/* Pure: compare a project's achieved gauge with its pattern's (same square,
+   converted between 4 in and 10 cm). Within 5% counts as on gauge.
+   Returns { sts, rows } each 'on' | 'tight' | 'loose' | null. */
+function compareGauge(mine, target){
+  if(!mine || !target) return null;
+  const per10cm = (g, v) => v == null || v === '' ? null : Number(v) * (g.unit === 'cm' ? 1 : 10 / 10.16);
+  const cmp = (a, b) => (a == null || b == null || !b) ? null : Math.abs(a - b) / b <= 0.05 ? 'on' : (a > b ? 'tight' : 'loose');
+  return { sts: cmp(per10cm(mine, mine.sts), per10cm(target, target.sts)), rows: cmp(per10cm(mine, mine.rows), per10cm(target, target.rows)) };
+}
+function renderGaugeVsPattern(p){
+  const pat = p.patternId && STATE.patterns.find(pt=>pt.id===p.patternId);
+  if(!pat || !pat.gauge || !(pat.gauge.sts || pat.gauge.rows)) return '';
+  const c = compareGauge(p.gauge, pat.gauge);
+  if(!c || (!c.sts && !c.rows)) return '';
+  const word = { on:'on gauge', tight:'tighter', loose:'looser' };
+  const parts = [c.sts && `sts ${word[c.sts]}`, c.rows && `rows ${word[c.rows]}`].filter(Boolean);
+  const off = c.sts && c.sts !== 'on' || c.rows && c.rows !== 'on';
+  return ` <span class="${off ? 'danger-text' : 'ok-text'}" title="Pattern: ${esc(String(pat.gauge.sts||'?'))}×${esc(String(pat.gauge.rows||'?'))} per ${pat.gauge.unit==='cm'?'10 cm':'4 in'}">(${off ? parts.join(', ') : 'on gauge'} vs pattern)</span>`;
 }
 /* Project notes on the list row: first line as a one-line preview; tap to
    expand the full text (line breaks preserved). */
@@ -3104,7 +3706,7 @@ function shopProjectGap(id){
     note: 'Project gap',
     sourceType: 'project', sourceId: p.id, sourceName: p.name
   });
-  wgToast(`Added ~${Math.round(gapInfo.gap)} yd to your shopping list for "${p.name}".`, "success");
+  wgToast(`Added ~${toDisplayLength(gapInfo.gap)} ${unitLabel()} to your shopping list for "${p.name}".`, "success");
   renderTab();
 }
 
@@ -3521,7 +4123,7 @@ function renderShowcaseCard(p){
         <p style="margin:0; font-weight:600; font-family:'Fraunces',serif;">${esc(p.name)}</p>
         <button class="del-btn" onclick="showProjectForm('${p.id}')" aria-label="Edit project, add photos" title="Edit / add photos" style="flex-shrink:0;">${ICONS.pencil}</button>
       </div>
-      ${p.patternName ? `<p class="note" style="margin:2px 0 0;">${esc(p.patternName)}</p>` : ''}
+      ${p.patternName ? `<p class="note" style="margin:2px 0 0;">${p.patternId && STATE.patterns.some(pt=>pt.id===p.patternId) ? `<button type="button" class="pattern-inline-link" onclick="openPatternInLibrary('${p.patternId}')">${ICONS.book} ${esc(p.patternName)}</button>` : esc(p.patternName)}${p.patternSize ? ` · size ${esc(p.patternSize)}` : ''}</p>` : ''}
       <div style="display:flex; align-items:center; gap:6px; margin-top:8px; flex-wrap:wrap;">
         ${usedYarns.map(y=>`<span class="dot" style="background:${y.colorHex}" title="${esc(y.name)}"></span>`).join('')}
         ${garmentBadge ? `<span class="note">${esc(garmentBadge)}</span>` : ''}
@@ -3615,7 +4217,8 @@ function addShoppingItem(item){
     yardage: item.yardage || null,
     quantity: item.quantity || 1,
     note: item.note || null,
-    sourceType: item.sourceType || 'manual',   // 'project' | 'palette' | 'manual'
+    sourceType: item.sourceType || 'manual',   // 'project' | 'palette' | 'pattern' | 'manual'
+    yarnId: item.yarnId || null,               // stash yarn this tops up, if any
     sourceId: item.sourceId || null,
     sourceName: item.sourceName || null,
     done: false,
@@ -4648,7 +5251,7 @@ function pdfTextLines(content, pageNum){
   const raw = content.items.filter(it => it.str && it.str.trim())
     .map(it => ({ str: it.str, x: it.transform[4], y: it.transform[5], w: it.width||0, size: Math.hypot(it.transform[2], it.transform[3]) || it.height || 10 }));
   // Display fonts often draw the same word twice (fill + outline/shadow) —
-  // keep one, or "LACEY" reads as "LACEYLACEY".
+  // keep one, or "TITLE" reads as "TITLETITLE".
   const items = raw.filter((it, i) => !raw.slice(0, i).some(o => o.str === it.str && Math.abs(o.x - it.x) < it.size*0.4 && Math.abs(o.y - it.y) < it.size*0.4));
   items.sort((a,b) => b.y - a.y);
   // Group into rows by baseline, then read each row left to right.
@@ -5413,7 +6016,7 @@ function mergePdfFindings(pat, found){
 const BULK_FILE_ROLE_WORDS = ['lookbook','look book','pattern','patterns','crochet','knit','knitting','pdf','chart','charts','colour update','color update','update','updated','english','eng','compressed','final','fast','link','links','printable','print'];
 const BULK_SECONDARY_RE = /look ?book|chart|update|link|photos?\b|gallery/i;
 // A file name reduced to the words naming the pattern:
-// 'TheTesseraeJumperColourUpdate.pdf' and 'The_Tesserae_Jumper.pdf' → 'tesserae jumper'.
+// 'TheHarbourJumperColourUpdate.pdf' and 'The_Harbour_Jumper.pdf' → 'harbour jumper'.
 function patternFileKey(name){
   let s = String(name||'').replace(/(\.pdf)+$/i,'').replace(/\.(jpe?g|png|webp|gif|heic|heif)$/i,'');
   s = s.replace(/([a-z])([A-Z])/g,'$1 $2').replace(/([A-Z]+)([A-Z][a-z])/g,'$1 $2');
@@ -5423,7 +6026,7 @@ function patternFileKey(name){
   s = s.replace(/ (the|a|an|and|by) /g,' ').replace(/ (the|a|an|and|by) /g,' ');
   return s.trim().replace(/\s+/g,' ');
 }
-// Two keys belong together when one's words start the other's ('venus' + 'venus full set').
+// Two keys belong together when one's words start the other's ('juniper' + 'juniper full set').
 function patternKeysMatch(a, b){
   if(!a || !b) return false;
   const x = a.split(' '), y = b.split(' ');
@@ -5440,7 +6043,10 @@ function bulkPatternName(fileName, foundName){
   const fits = n && patternFileKey(n).split(' ').some(w => words.has(w));
   if(!fits) n = String(fileName||'').replace(/(\.pdf)+$/i,'').replace(/\.[a-z0-9]{2,4}$/i,'').replace(/([a-z])([A-Z])/g,'$1 $2')
     .replace(/[_]+/g,' ').replace(/\b(look ?book|crochet pattern|knitting pattern|pattern|v\d+)\b/gi,'').replace(/\s+/g,' ').trim();
-  if(n && n === n.toUpperCase()) n = n.toLowerCase().replace(/\b[a-z]/g, c => c.toUpperCase());
+  // A generic file name ('pattern.pdf') leaves nothing: use the PDF's own title.
+  if(!n) n = String(foundName||'').split(/ [-–|] /)[0].replace(/\s+/g,' ').trim();
+  if(!n) return 'Untitled pattern';
+  if(n === n.toUpperCase()) n = n.toLowerCase().replace(/\b[a-z]/g, c => c.toUpperCase());
   return n.charAt(0).toUpperCase() + n.slice(1);
 }
 /* Group files into patterns. items: [{ name, size, foundName }].
@@ -5492,6 +6098,7 @@ function startBulkPatternImport(fileList){
   for(const file of files){
     const isPdf = /pdf/i.test(file.type||'') || /\.pdf$/i.test(file.name||'');
     if(!isPdf && !isAcceptableImageFile(file)){ wgToast(`${file.name}: only PDFs and images can be added.`, 'error'); continue; }
+    if(!isPdf && file.size > PATTERN_FILE_MAX){ wgToast(`${file.name} is over ${Math.round(PATTERN_FILE_MAX/1048576)} MB.`, 'error'); continue; }
     items.push({ file, name: file.name || 'pattern', size: file.size || 0, isPdf, over: file.size > PATTERN_FILE_MAX, res: null });
   }
   if(!items.length) return;
@@ -5566,7 +6173,8 @@ function renderBulkPatterns(){
 }
 async function saveBulkPatterns(){
   const b = bulkPatterns; if(!b || b.phase !== 'review') return;
-  const groups = b.groups.filter(g => g.include && g.items.length && (g.existingId || String(g.name||'').trim()));
+  const groups = b.groups.filter(g => g.include && g.items.length);
+  groups.forEach(g => { if(!g.existingId && !String(g.name||'').trim()) g.name = 'Untitled pattern'; });
   if(!groups.length) return;
   b.phase = 'saving'; b.done = 0; b.total = groups.reduce((n,g) => n + g.items.length, 0);
   renderTab();
@@ -5780,11 +6388,70 @@ function patternSizesCovered(sizes, have){
 function patternStashMatches(pat){
   const r = patternYardageRange(pat);
   if(!pat.weightCategory || !r) return null;
-  const same = STATE.yarns.filter(y=>y.weightCategory===pat.weightCategory && (Number(y.yardageRemaining)||0)>0);
+  // Yarn set aside for a project isn't free for another pattern.
+  const same = STATE.yarns.filter(y=>y.weightCategory===pat.weightCategory && yarnStatus(y)!=='allocated' && (Number(y.yardageRemaining)||0)>0);
   const enough = same.filter(y=>(Number(y.yardageRemaining)||0) >= r.min)
     .sort((a,b)=>(Number(b.yardageRemaining)||0)-(Number(a.yardageRemaining)||0));
   const best = same.slice().sort((a,b)=>(Number(b.yardageRemaining)||0)-(Number(a.yardageRemaining)||0))[0] || null;
   return { enough, best, sameCount: same.length, need: r.min, sized: r.count > 0 };
+}
+/* Pure: ways to buy yarn for a pattern in one size. need: yards. Same-weight
+   stash yarns, best first. Returns [{ kind:'topup', yarn, yards } | { kind:'new', yards }]
+   — topping up the yarn you have most of (if it's short), or buying all new. */
+function patternShoppingOptions(need, sameWeightYarns){
+  const opts = [];
+  const best = (sameWeightYarns||[]).filter(y => (Number(y.yardageRemaining)||0) > 0)
+    .sort((a,b) => (Number(b.yardageRemaining)||0) - (Number(a.yardageRemaining)||0))[0];
+  if(best){
+    const short = need - (Number(best.yardageRemaining)||0);
+    if(short <= 0) return [];   // you already have enough
+    opts.push({ kind:'topup', yarn: best, yards: Math.ceil(short) });
+  }
+  opts.push({ kind:'new', yards: Math.ceil(need) });
+  return opts;
+}
+async function shopForPattern(id){
+  if(!STATE.online){ wgToast("You're offline — adding to the shopping list needs a connection.", "error"); return; }
+  const pat = STATE.patterns.find(p=>p.id===id);
+  if(!pat) return;
+  const sizes = (pat.sizes||[]).filter(x=>x.yardage>0);
+  let size = null, need = pat.yardage;
+  if(sizes.length){
+    const pick = await wgChoose('Which size are you shopping for?', { title: `Yarn for ${pat.name}`,
+      choices: sizes.map(x => ({ label: x.label, detail: `${toDisplayLength(x.yardage).toLocaleString()} ${unitLabel()}`, value: x.label })) });
+    if(!pick) return;
+    size = sizes.find(x=>x.label===pick); need = size.yardage;
+  }
+  if(!need) return;
+  const same = STATE.yarns.filter(y => pat.weightCategory && y.weightCategory === pat.weightCategory && yarnStatus(y)!=='allocated');
+  const opts = patternShoppingOptions(need, same);
+  if(!opts.length){ wgToast(`You already have enough ${pat.weightCategory} yarn for this${size ? ` in ${size.label}` : ''}.`); return; }
+  const forWhat = `${pat.name}${size ? ` (${size.label})` : ''}`;
+  const choice = opts.length === 1 ? opts[0] : await wgChoose(`${forWhat} needs ${toDisplayLength(need).toLocaleString()} ${unitLabel()}.`, {
+    title: 'Add to shopping list',
+    choices: opts.map((o,i) => o.kind === 'topup'
+      ? { label: `More of ${yarnDisplayName(o.yarn)}`, detail: `${toDisplayLength(o.yards).toLocaleString()} ${unitLabel()} to top up what you have (match the dye lot if you can)`, value: o, primary: i===0 }
+      : { label: `New ${pat.weightCategory || ''} yarn`.replace(/\s+/g,' '), detail: `${toDisplayLength(o.yards).toLocaleString()} ${unitLabel()}, the full amount`, value: o })
+  });
+  if(!choice) return;
+  const note = `For ${forWhat}`;
+  if(STATE.shoppingList.some(i => !i.done && i.sourceType==='pattern' && i.sourceId===pat.id && i.note===note)){
+    wgToast(`${forWhat} is already on your shopping list.`); return;
+  }
+  const y = choice.kind === 'topup' ? choice.yarn : null;
+  addShoppingItem({
+    colorName: y ? [y.colorway, y.colorwayNumber ? '#'+y.colorwayNumber : ''].filter(Boolean).join(' ') || null : null,
+    hex: y ? y.colorHex : null,
+    weight: pat.weightCategory || null,
+    fiber: y ? y.fiber : null,
+    yardage: choice.yards,
+    quantity: 1,
+    note,
+    sourceType: 'pattern', sourceId: pat.id, sourceName: pat.name,
+    yarnId: y ? y.id : null
+  });
+  wgToast(`Added ~${toDisplayLength(choice.yards).toLocaleString()} ${unitLabel()} to your shopping list for ${forWhat}.`, 'success');
+  renderTab();
 }
 function renderPatternStashLine(pat){
   const m = patternStashMatches(pat);
@@ -5933,10 +6600,11 @@ function renderPatternCard(pat){
     </div>` : ''}
     ${pat.notes ? renderProjectNotes(pat.notes) : ''}
     ${renderPatternStashLine(pat)}
-    ${projects.length ? `<p class="note" style="margin:6px 0 0; font-size:0.72rem;">Projects: ${projects.map(p=>esc(p.name)).join(', ')}</p>` : ''}
+    ${projects.length ? `<p class="note" style="margin:6px 0 0; font-size:0.72rem;">Projects: ${projects.map(p=>`<button type="button" class="pattern-inline-link" onclick="openProjectInList('${p.id}')">${esc(p.name)}</button>${p.patternSize ? ` (${esc(p.patternSize)})` : ''} <span class="note">· ${esc(p.status)}</span>`).join(', ')}</p>` : ''}
     <div class="pattern-actions">
       ${STATE.online ? `<button class="btn btn-ghost btn-small" onclick="startProjectFromPattern('${pat.id}')">${ICONS.sparkles} Start project</button>` : ''}
       ${pat.gauge && (pat.gauge.sts||pat.gauge.rows) ? `<button class="btn btn-ghost btn-small" onclick="patternToGauge('${pat.id}')">📐 Check gauge</button>` : ''}
+      ${STATE.online && patternYardageRange(pat) ? `<button class="btn btn-ghost btn-small" onclick="shopForPattern('${pat.id}')" title="Add the yarn this pattern needs to your shopping list">${ICONS.cart} Shop</button>` : ''}
       <span class="pattern-edit">
         <button class="del-btn" onclick="showPatternForm('${pat.id}')" aria-label="Edit pattern">${ICONS.pencil}</button>
         <button class="del-btn" onclick="deletePattern('${pat.id}')" aria-label="Delete pattern">${ICONS.trash}</button>
@@ -6153,9 +6821,16 @@ function renderShoppingGroup(group){
   const done = rep.done;
   const totalQty = group.reduce((s,i)=>s+(Number(i.quantity)||1),0);
   const spec = [rep.colorName, rep.weight, rep.fiber, rep.yardage?('~'+toDisplayLength(rep.yardage)+' '+unitLabel()):''].filter(Boolean).join(' · ') || 'Yarn';
-  const sources = group.filter(i=>i.sourceType!=='manual' && i.sourceName).map(i=>i.sourceName);
-  const uniqueSources = [...new Set(sources)];
-  const srcLine = uniqueSources.length ? `<p class="note" style="margin:2px 0 0;">for: ${uniqueSources.map(esc).join(', ')}</p>` : '';
+  const srcLinks = [];
+  group.filter(i=>i.sourceType!=='manual' && i.sourceName).forEach(i => {
+    const key = i.sourceType + ':' + (i.sourceId||i.sourceName);
+    if(srcLinks.some(x=>x.key===key)) return;
+    let html = esc(i.sourceName);
+    if(i.sourceType==='project' && STATE.projects.some(p=>p.id===i.sourceId)) html = `<button type="button" class="pattern-inline-link" onclick="openProjectInList('${i.sourceId}')">${esc(i.sourceName)}</button>`;
+    else if(i.sourceType==='pattern' && STATE.patterns.some(p=>p.id===i.sourceId)) html = `<button type="button" class="pattern-inline-link" onclick="openPatternInLibrary('${i.sourceId}')">${esc(i.sourceName)}</button>`;
+    srcLinks.push({ key, html });
+  });
+  const srcLine = srcLinks.length ? `<p class="note" style="margin:2px 0 0;">for: ${srcLinks.map(x=>x.html).join(', ')}</p>` : '';
   const ids = group.map(i=>i.id);
   return `<div class="card" style="display:flex; align-items:flex-start; gap:12px; ${done?'opacity:0.55;':''}">
     <button onclick="toggleShoppingGroupDone('${ids.join(',')}')" aria-label="Toggle done" style="background:none;border:1px solid var(--border);border-radius:5px;width:22px;height:22px;flex-shrink:0;cursor:pointer;color:var(--forest);font-size:0.9rem;line-height:1;margin-top:2px;">${done?'✓':''}</button>
@@ -6167,6 +6842,7 @@ function renderShoppingGroup(group){
         <a class="btn btn-ghost btn-small" href="${esc(googleSearchUrl(rep))}" target="_blank" rel="noopener">Search Google</a>
         <a class="btn btn-ghost btn-small" href="${esc(ravelrySearchUrl(rep))}" target="_blank" rel="noopener">Search Ravelry</a>
         ${group.length===1 ? `<button class="btn btn-ghost btn-small" onclick="editShoppingItem('${rep.id}')">Edit</button>` : ''}
+        ${done && STATE.online ? `<button class="btn btn-primary btn-small" onclick="addShoppingItemToStash('${rep.id}')">${ICONS.plus} Add to stash</button>` : ''}
       </div>
     </div>
     <button class="del-btn" onclick="removeShoppingGroup('${ids.join(',')}')" aria-label="Remove">${ICONS.trash}</button>
@@ -6179,6 +6855,46 @@ function toggleShoppingGroupDone(idsStr){
   persist();
   renderTab();
 }
+/* A bought shopping item → stash: top up the yarn it was for (when it came
+   from "more of this yarn"), or open the yarn form pre-filled with what's known. */
+async function addShoppingItemToStash(id){
+  const it = STATE.shoppingList.find(i=>i.id===id);
+  if(!it) return;
+  const yarn = it.yarnId && STATE.yarns.find(y=>y.id===it.yarnId);
+  if(yarn){
+    const choice = await wgChoose(`You bought ${it.yardage ? '~'+toDisplayLength(it.yardage).toLocaleString()+' '+unitLabel()+' of ' : ''}${yarnDisplayName(yarn)}.`, { title:'Add to stash', choices:[
+      { label:`Add it to ${yarnDisplayName(yarn)}`, detail:'Same yarn — adds the length to what you have', value:'topup', primary:true },
+      { label:'Log it as a separate yarn', detail:'e.g. a different dye lot', value:'new' }]});
+    if(!choice) return;
+    if(choice === 'topup'){
+      const amt = await wgPrompt(`How much did you buy (${unitLabel()})?`, { title:'Add to stash', defaultValue: it.yardage ? String(toDisplayLength(it.yardage)) : '', okLabel:'Add' });
+      const yd = Math.round(fromInputLength(amt));
+      if(!amt || !(yd > 0)) return;
+      STATE.yarns = STATE.yarns.map(y => y.id===yarn.id ? { ...y, yardageRemaining: (Number(y.yardageRemaining)||0) + yd } : y);
+      STATE.shoppingList = STATE.shoppingList.filter(i=>i.id!==id);
+      await persist();
+      renderTab();
+      wgToast(`Added ${toDisplayLength(yd).toLocaleString()} ${unitLabel()} to ${yarnDisplayName(yarn)}.`, 'success');
+      return;
+    }
+  }
+  cleanupOpenForms();
+  STATE.tab = 'stash';
+  showYarnForm();
+  if(it.hex) pendingColorHex = it.hex;
+  render();
+  const set = (elId, val) => { const el = document.getElementById(elId); if(el && val != null && val !== '') el.value = val; };
+  set('yf-colorway', it.colorName);
+  if(it.weight && WEIGHTS.includes(it.weight)) set('yf-weightcat', it.weight);
+  set('yf-fiber', it.fiber);
+  set('yf-quantity', it.quantity > 1 ? it.quantity : null);
+  set('yf-purchasedate', todayStr());
+  if(it.hex) set('yf-colorhex', it.hex);
+  pendingShoppingToStashId = id;
+  scrollToTop();
+  wgToast('Add the brand, yarn name and length, then save — the item comes off your list.');
+}
+let pendingShoppingToStashId = null;   // shopping item being turned into a yarn
 function removeShoppingGroup(idsStr){
   const ids = idsStr.split(',');
   STATE.shoppingList = STATE.shoppingList.filter(i=>!ids.includes(i.id));
