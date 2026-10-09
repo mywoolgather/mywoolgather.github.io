@@ -437,6 +437,12 @@ function applyYarnUse(y, yards, source){
    display/input edges based on the user's preference. */
 const YD_PER_M = 1.0936133;
 function unitLabel(){ return STATE.unitPref === 'm' ? 'm' : 'yd'; }
+/* A saved gauge keeps its own square; a new one starts in the person's units
+   (metres → per 10 cm, yards → per 4 in). */
+function gaugeUnitDefault(gauge){
+  if(gauge && (gauge.sts || gauge.rows) && gauge.unit) return gauge.unit === 'cm' ? 'cm' : 'in';
+  return STATE.unitPref === 'm' ? 'cm' : 'in';
+}
 function toDisplayLength(yards){          // canonical yd -> shown value
   const v = STATE.unitPref === 'm' ? (Number(yards)||0) / YD_PER_M : (Number(yards)||0);
   return Math.round(v);
@@ -3268,8 +3274,8 @@ function renderProjectForm(){
         <input id="pf-gauge-sts" type="number" min="0" step="any" placeholder="18" style="width:60px;" value="${editing && editing.gauge ? esc(editing.gauge.sts??'') : ''}" /> sts ×
         <input id="pf-gauge-rows" type="number" min="0" step="any" placeholder="24" style="width:60px;" value="${editing && editing.gauge ? esc(editing.gauge.rows??'') : ''}" /> rows per
         <select id="pf-gauge-unit">
-          <option value="in" ${editing && editing.gauge && editing.gauge.unit==='cm'?'':'selected'}>4 in</option>
-          <option value="cm" ${editing && editing.gauge && editing.gauge.unit==='cm'?'selected':''}>10 cm</option>
+          <option value="in" ${gaugeUnitDefault(editing && editing.gauge)==='cm'?'':'selected'}>4 in</option>
+          <option value="cm" ${gaugeUnitDefault(editing && editing.gauge)==='cm'?'selected':''}>10 cm</option>
         </select>
       </div>
     </div>
@@ -6289,8 +6295,8 @@ function renderPatternForm(){
         <input id="patf-gauge-sts" type="number" min="0" step="any" placeholder="18" style="width:60px;" value="${esc(g.sts??'')}" /> sts ×
         <input id="patf-gauge-rows" type="number" min="0" step="any" placeholder="24" style="width:60px;" value="${esc(g.rows??'')}" /> rows per
         <select id="patf-gauge-unit">
-          <option value="in" ${g.unit==='cm'?'':'selected'}>4 in</option>
-          <option value="cm" ${g.unit==='cm'?'selected':''}>10 cm</option>
+          <option value="in" ${gaugeUnitDefault(g)==='cm'?'':'selected'}>4 in</option>
+          <option value="cm" ${gaugeUnitDefault(g)==='cm'?'selected':''}>10 cm</option>
         </select>
       </div>
     </div>
@@ -6737,7 +6743,7 @@ function buildInStoreSection(){
       if(g && g.gap>0){
         const linked = STATE.yarns.filter(y=>(p.yarnIds||[]).includes(y.id));
         if(linked.some(y=>deltaE2000(capLab, hexToLab(y.colorHex))<15)){
-          wants.push(`Project "${esc(p.name)}" still needs ~${Math.round(g.gap)} yd of a similar color`);
+          wants.push(`Project "${esc(p.name)}" still needs ~${toDisplayLength(g.gap)} ${unitLabel()} of a similar color`);
         }
       }
     });
