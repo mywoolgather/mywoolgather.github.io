@@ -249,48 +249,48 @@
     ok('pdf: empty input → all null', Object.values(parsePatternText([])).every(v=>v===null));
   }catch(e){ ok('pattern pdf block threw: '+e.message, false); }
 
-  // --- Pattern PDFs: sizes, versions, made-to-measure (from real garment patterns) ---
+  // --- Pattern PDFs: sizes, versions, made-to-measure (made-up text in the
+  //     layouts real garment patterns use) ---
   try{
-    const lovelace = parsePatternText([
-      {text:'LOVELACE TOP', size:24.6, page:1},
+    const sized = parsePatternText([
+      {text:'WILLOW TOP', size:24.6, page:1},
       {text:'MATERIALS', size:16.7, page:1},
-      {text:'XS – 11 oz (312 g) / 1,126 yd (1,030 m)', size:10.3, page:1},
-      {text:'S – 12 oz (340 g) / 1,227 yd (1,122 m)', size:10.3, page:1},
+      {text:'XS – 10 oz (284 g) / 1,050 yd (960 m)', size:10.3, page:1},
+      {text:'S – 11 oz (312 g) / 1,150 yd (1,052 m)', size:10.3, page:1},
       {text:'Hook: Size 4.00mm', size:10.3, page:1},
-      {text:'M – 13.5 oz (383 g) / 1,381 yd (1,263 m)', size:10.3, page:1},
-      {text:'2XL – 16 oz (454 g) / 1,636 yd (1,495 m)', size:10.3, page:1},
-      {text:'your tension, stitch variations, and any modifications', size:10.3, page:1},
-      {text:'leaf → 5 dc in the same st', size:10.3, page:1},
-      {text:'(@creationofmobius on Instagram)', size:10.1, page:1},
+      {text:'M – 12.5 oz (354 g) / 1,300 yd (1,189 m)', size:10.3, page:1},
+      {text:'2XL – 15 oz (425 g) / 1,560 yd (1,426 m)', size:10.3, page:1},
+      {text:'your tension and any changes can affect how much you use', size:10.3, page:1},
+      {text:'shell → 5 dc in the same st', size:10.3, page:1},
+      {text:'(@fernhollowmakes on Instagram)', size:10.1, page:1},
       {text:'GAUGE', size:16.7, page:1},
-      {text:'16 sts = 4 inc (10cm) in double crochets', size:10.3, page:1},
-      {text:'7 rows = 4 inc (10cm) in double crochets', size:10.3, page:1}
+      {text:'18 sts = 4 inc (10cm) in dc', size:10.3, page:1},
+      {text:'8 rows = 4 inc (10cm) in dc', size:10.3, page:1}
     ]);
-    ok('sizes: a line per size → 4 sizes, yards (not oz or metres)', lovelace.sizes && lovelace.sizes.length===4 && lovelace.sizes[0].label==='XS' && lovelace.sizes[0].yardage===1126 && lovelace.sizes[3].label==='2XL' && lovelace.sizes[3].yardage===1636);
-    ok('sizes: no single yardage when sizes are found', lovelace.yardage===null);
-    ok('gauge: "4 inc" is inches, prose "tension … 5 dc" ignored', lovelace.gauge && lovelace.gauge.sts===16 && lovelace.gauge.rows===7 && lovelace.gauge.unit==='in');
-    ok('needle: size row "M – 13.5 oz" is not a hook letter', lovelace.needleSize==='4 mm');
-    ok('designer: "@handle on Instagram"', lovelace.designer==='@creationofmobius');
+    ok('sizes: a line per size → 4 sizes, yards (not oz or metres)', sized.sizes && sized.sizes.length===4 && sized.sizes[0].label==='XS' && sized.sizes[0].yardage===1050 && sized.sizes[3].label==='2XL' && sized.sizes[3].yardage===1560);
+    ok('sizes: no single yardage when sizes are found', sized.yardage===null);
+    ok('gauge: "4 inc" is inches, prose "tension … 5 dc" ignored', sized.gauge && sized.gauge.sts===18 && sized.gauge.rows===8 && sized.gauge.unit==='in');
+    ok('needle: size row "M – 12.5 oz" is not a hook letter', sized.needleSize==='4 mm');
+    ok('designer: "@handle on Instagram"', sized.designer==='@fernhollowmakes');
 
-    const lacey = parsePatternText(['This pattern is owned by CassRaeCrochets. You are not allowed to copy it.',
-      'I used 2 skeins (350 yards) of "I Love This Cotton" yarn for the short sleeves,', 'and 4 skeins (700 yards) for the long sleeves',
-      'Because the pattern is measurement based, it can be customized']);
-    ok('versions: "350 yards … for the short sleeves, 700 yards for the long sleeves"', lacey.sizes && lacey.sizes.length===2 && lacey.sizes[0].label==='Short sleeves' && lacey.sizes[0].yardage===350 && lacey.sizes[1].label==='Long sleeves' && lacey.sizes[1].yardage===700);
-    ok('designer: "owned by X." stops at the sentence end', lacey.designer==='CassRaeCrochets');
+    const versions = parsePatternText(['This pattern is owned by BrambleStitch. Please do not share it.',
+      'I used 3 skeins (400 yards) of cotton yarn for the cropped length,', 'and 5 skeins (650 yards) for the full length',
+      'You can make it longer or shorter as you go']);
+    ok('versions: "400 yards … for the cropped length, 650 yards for the full length"', versions.sizes && versions.sizes.length===2 && versions.sizes[0].label==='Cropped length' && versions.sizes[0].yardage===400 && versions.sizes[1].label==='Full length' && versions.sizes[1].yardage===650);
+    ok('designer: "owned by X." stops at the sentence end', versions.designer==='BrambleStitch');
 
-    const nightshade = parsePatternText(['Crochet cardigan designed by @nikita_crochets_',
-      'I used approx. 200 g of 100 % cotton sequin yarn (200 g/600 m, fingering weight).',
-      'I paired my cotton yarn with lace weight mohair/silk blend yarn (25g/210m) from a Danish',
-      'store (brand is called Hjertegarn). I used approx. 150g (6 skeins).',
-      'Crochet hook', '4 mm larger than the (largest) size listed on the cotton yarn label. My yarn label recommended sizes 1,75-2,5 mm']);
-    ok('made to measure: grams used × length per weight, both yarns (≈1,860 m)', nightshade.yardage===Math.round(600*YD_PER_M + 150*(210/25)*YD_PER_M));
-    ok('needle: "4 mm larger than" and "1,75-2,5 mm" are advice, not the hook', nightshade.needleSize===null);
-    ok('designer: "designed by @handle"', nightshade.designer==='@nikita_crochets_');
+    const measured = parsePatternText(['Cardigan designed by @mossandmarrow',
+      'I used approx. 250 g of linen yarn (100 g/300 m, fingering weight).',
+      'It is held together with a lace weight mohair (25g/200m),', 'of which I used approx. 75g (3 skeins).',
+      'Crochet hook', '3 mm larger than the size on your yarn label (mine said 2-2,5 mm)']);
+    ok('made to measure: grams used × length per weight, both yarns (≈1,350 m)', measured.yardage===Math.round(750*YD_PER_M + 75*(200/25)*YD_PER_M));
+    ok('needle: "3 mm larger than" and "2-2,5 mm" are advice, not the hook', measured.needleSize===null);
+    ok('designer: "designed by @handle"', measured.designer==='@mossandmarrow');
 
     const listed = parsePatternText(['Sizes: XS (S, M, L) [XL, 2XL]', 'MC: 600 (650, 700, 760) [820, 880] yds', 'CC: 100 (110, 120, 130) [140, 150] yds']);
     ok('sizes: size list + matching yardage lists, MC + CC added per size', listed.sizes && listed.sizes.length===6 && listed.sizes[0].yardage===700 && listed.sizes[5].label==='2XL' && listed.sizes[5].yardage===1030);
-    const swatch = parsePatternText(['Gauge swatch', 'MY MEASUREMENTS (Example):', '5 STS = 2.5 cm in width.', '5 ROWS = 3.5 cm in height.']);
-    ok('gauge: stitches and rows each use their own measurement', swatch.gauge && swatch.gauge.sts===20 && swatch.gauge.rows===14.3 && swatch.gauge.unit==='cm');
+    const swatch = parsePatternText(['Gauge swatch', 'My example:', '6 STS = 3 cm wide.', '4 ROWS = 2.5 cm tall.']);
+    ok('gauge: stitches and rows each use their own measurement', swatch.gauge && swatch.gauge.sts===20 && swatch.gauge.rows===16 && swatch.gauge.unit==='cm');
 
     const sz = [{label:'XS',yardage:1126},{label:'S',yardage:1227},{label:'M',yardage:1381},{label:'L',yardage:1483}];
     ok('covered: 1,400 yd → XS–M', patternSizesCovered(sz, 1400)==='XS–M');
@@ -317,27 +317,29 @@
 
   // --- Bulk add: grouping files into patterns by name ---
   try{
-    ok('bulk key: role words, camel case, versions dropped', patternFileKey('TheTesseraeJumperColourUpdate.pdf')==='tesserae jumper' && patternFileKey('The_Tesserae_Jumper_Chart.pdf')==='tesserae jumper');
-    ok('bulk key: glued version suffix and double extension', patternFileKey('Garteraddonsv11.pdf.pdf')==='garteraddons' && patternFileKey('ElementsBikiniBottomsV11.pdf')==='elements bikini bottoms');
-    ok('bulk key: lookbook and crochet pattern match', patternFileKey('Deadly_nightshade_cardigan_lookbook.pdf')===patternFileKey('Deadly_nightshade_cardigan_crochet_pattern.pdf'));
-    ok('bulk keys: shorter name starts the longer', patternKeysMatch('venus', 'venus full set') && !patternKeysMatch('elements bikini bottoms', 'elements skirt'));
-    const files = ['Venus_full_set_crochet_pattern.pdf','Venus_lookbook.pdf','poison_ivy_lookbook_1.pdf','Poison_ivy_cardigan_crochet_pattern.pdf',
-      'PKC_HolidayDoodle_Infinity.pdf','PKC_HolidayDoodle_Exp1_Charts.pdf','PKC_WinterSkiesDoodle_Infinity.pdf','Mushroom_Applique_Pattern_Link.pdf','Mushroom_Applique_PDF_Pattern_Fast.pdf',
-      'ElementsBikiniBottomsV11.pdf','Thelementsskirtv12.pdf','LovelaceTop.pdf'].map((name,i) => ({ name, size: 1000+i, foundName: null }));
-    const lib = [{ id:'L', name:'Lovelace Top', files:[{ name:'LovelaceTop.pdf', size: 1011 }] }, { id:'M', name:'Mosey Sweater', files:[] }];
+    ok('bulk key: role words, camel case, versions dropped', patternFileKey('TheHarbourJumperColourUpdate.pdf')==='harbour jumper' && patternFileKey('The_Harbour_Jumper_Chart.pdf')==='harbour jumper');
+    ok('bulk key: glued version suffix and double extension', patternFileKey('Fernaddonsv11.pdf.pdf')==='fernaddons' && patternFileKey('TidesBikiniBottomsV11.pdf')==='tides bikini bottoms');
+    ok('bulk key: lookbook and crochet pattern match', patternFileKey('Bramble_rose_cardigan_lookbook.pdf')===patternFileKey('Bramble_rose_cardigan_crochet_pattern.pdf'));
+    ok('bulk keys: shorter name starts the longer', patternKeysMatch('juniper', 'juniper full set') && !patternKeysMatch('tides bikini bottoms', 'tides skirt'));
+    const files = ['Juniper_full_set_crochet_pattern.pdf','Juniper_lookbook.pdf','wild_thyme_lookbook_1.pdf','Wild_thyme_cardigan_crochet_pattern.pdf',
+      'ABC_SnowDoodle_Infinity.pdf','ABC_SnowDoodle_Exp1_Charts.pdf','ABC_RainDoodle_Infinity.pdf','Acorn_Applique_Pattern_Link.pdf','Acorn_Applique_PDF_Pattern_Fast.pdf',
+      'TidesBikiniBottomsV11.pdf','Thetidesskirtv12.pdf','WillowTop.pdf'].map((name,i) => ({ name, size: 1000+i, foundName: null }));
+    const lib = [{ id:'L', name:'Willow Top', files:[{ name:'WillowTop.pdf', size: 1011 }] }, { id:'M', name:'Meadow Sweater', files:[] }];
     const r = groupPatternFiles(files, lib);
     const groupOf = n => r.groups.find(g => g.items.some(i => files[i].name === n));
-    ok('bulk group: pattern + lookbook together, pattern first', groupOf('Venus_lookbook.pdf') === groupOf('Venus_full_set_crochet_pattern.pdf') && files[groupOf('Venus_lookbook.pdf').items[0]].name.startsWith('Venus_full'));
-    ok('bulk group: lookbook listed first still ends up second', files[groupOf('poison_ivy_lookbook_1.pdf').items[0]].name.startsWith('Poison_ivy_cardigan'));
-    ok('bulk group: charts expansion joins its cowl, other cowl stays apart', groupOf('PKC_HolidayDoodle_Exp1_Charts.pdf') === groupOf('PKC_HolidayDoodle_Infinity.pdf') && groupOf('PKC_WinterSkiesDoodle_Infinity.pdf') !== groupOf('PKC_HolidayDoodle_Infinity.pdf'));
-    ok('bulk group: link sheet joins its pattern', groupOf('Mushroom_Applique_Pattern_Link.pdf') === groupOf('Mushroom_Applique_PDF_Pattern_Fast.pdf'));
-    ok('bulk group: two Elements patterns stay apart', groupOf('ElementsBikiniBottomsV11.pdf') !== groupOf('Thelementsskirtv12.pdf'));
-    ok('bulk group: same name + size already in library → skipped', r.duplicates.length===1 && files[r.duplicates[0]].name==='LovelaceTop.pdf');
-    const r2 = groupPatternFiles([{ name:'TheMoseySweaterCrochetPattern.pdf', size:5 }], lib);
+    ok('bulk group: pattern + lookbook together, pattern first', groupOf('Juniper_lookbook.pdf') === groupOf('Juniper_full_set_crochet_pattern.pdf') && files[groupOf('Juniper_lookbook.pdf').items[0]].name.startsWith('Juniper_full'));
+    ok('bulk group: lookbook listed first still ends up second', files[groupOf('wild_thyme_lookbook_1.pdf').items[0]].name.startsWith('Wild_thyme_cardigan'));
+    ok('bulk group: charts expansion joins its cowl, other cowl stays apart', groupOf('ABC_SnowDoodle_Exp1_Charts.pdf') === groupOf('ABC_SnowDoodle_Infinity.pdf') && groupOf('ABC_RainDoodle_Infinity.pdf') !== groupOf('ABC_SnowDoodle_Infinity.pdf'));
+    ok('bulk group: link sheet joins its pattern', groupOf('Acorn_Applique_Pattern_Link.pdf') === groupOf('Acorn_Applique_PDF_Pattern_Fast.pdf'));
+    ok('bulk group: two Tides patterns stay apart', groupOf('TidesBikiniBottomsV11.pdf') !== groupOf('Thetidesskirtv12.pdf'));
+    ok('bulk group: same name + size already in library → skipped', r.duplicates.length===1 && files[r.duplicates[0]].name==='WillowTop.pdf');
+    const r2 = groupPatternFiles([{ name:'TheMeadowSweaterCrochetPattern.pdf', size:5 }], lib);
     ok('bulk group: matches an existing pattern by name', r2.groups[0].existingId === 'M');
     ok('bulk name: PDF title used when it fits the file', bulkPatternName('Aurora_top_pattern.pdf', 'Aurora top')==='Aurora top');
-    ok('bulk name: junk title falls back to the file name', bulkPatternName('Persephone_top_lookbook.pdf', 'By: @nikita_crochets_ (designer) Size: small/medium.')==='Persephone top' && bulkPatternName('Mushroom_Applique_Pattern_Link.pdf', 'Hello!')==='Mushroom Applique Link');
-    ok('bulk name: shouting title tidied', bulkPatternName('Mushroom_Applique_PDF_Pattern_Fast.pdf', 'MUSHROOM APPLIQUE PDF PATTERN - do not sell or copy')==='Mushroom Applique');
+    ok('bulk name: junk title falls back to the file name', bulkPatternName('Marigold_top_lookbook.pdf', 'By: @someone_makes (designer) Size: small/medium.')==='Marigold top' && bulkPatternName('Acorn_Applique_Pattern_Link.pdf', 'Hello!')==='Acorn Applique Link');
+    ok('bulk name: generic file name uses the PDF title', bulkPatternName('pattern.pdf', 'Fern Shawl')==='Fern Shawl' && bulkPatternName('Crochet Pattern.pdf', 'SEA GLASS TEE - printable')==='Sea Glass Tee');
+    ok('bulk name: nothing to go on → Untitled pattern', bulkPatternName('pattern.pdf', null)==='Untitled pattern');
+    ok('bulk name: shouting title tidied', bulkPatternName('Acorn_Applique_PDF_Pattern_Fast.pdf', 'ACORN APPLIQUE PDF PATTERN - do not sell or copy')==='Acorn Applique');
     const m = mergeFoundDetails([{ name:'A', designer:null, craft:'crochet', yardage:684, needleSize:'4 mm' }, { designer:'@x', craft:'knit', yardage:415, needleSize:'8 mm', weightCategory:'DK' }]);
     ok('bulk details: first file wins, later files fill gaps', m.yardage===684 && m.needleSize==='4 mm' && m.designer==='@x' && m.weightCategory==='DK' && m.craft==='crochet');
   }catch(e){ ok('bulk add block threw: '+e.message, false); }

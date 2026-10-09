@@ -4648,7 +4648,7 @@ function pdfTextLines(content, pageNum){
   const raw = content.items.filter(it => it.str && it.str.trim())
     .map(it => ({ str: it.str, x: it.transform[4], y: it.transform[5], w: it.width||0, size: Math.hypot(it.transform[2], it.transform[3]) || it.height || 10 }));
   // Display fonts often draw the same word twice (fill + outline/shadow) —
-  // keep one, or "LACEY" reads as "LACEYLACEY".
+  // keep one, or "TITLE" reads as "TITLETITLE".
   const items = raw.filter((it, i) => !raw.slice(0, i).some(o => o.str === it.str && Math.abs(o.x - it.x) < it.size*0.4 && Math.abs(o.y - it.y) < it.size*0.4));
   items.sort((a,b) => b.y - a.y);
   // Group into rows by baseline, then read each row left to right.
@@ -5413,7 +5413,7 @@ function mergePdfFindings(pat, found){
 const BULK_FILE_ROLE_WORDS = ['lookbook','look book','pattern','patterns','crochet','knit','knitting','pdf','chart','charts','colour update','color update','update','updated','english','eng','compressed','final','fast','link','links','printable','print'];
 const BULK_SECONDARY_RE = /look ?book|chart|update|link|photos?\b|gallery/i;
 // A file name reduced to the words naming the pattern:
-// 'TheTesseraeJumperColourUpdate.pdf' and 'The_Tesserae_Jumper.pdf' → 'tesserae jumper'.
+// 'TheHarbourJumperColourUpdate.pdf' and 'The_Harbour_Jumper.pdf' → 'harbour jumper'.
 function patternFileKey(name){
   let s = String(name||'').replace(/(\.pdf)+$/i,'').replace(/\.(jpe?g|png|webp|gif|heic|heif)$/i,'');
   s = s.replace(/([a-z])([A-Z])/g,'$1 $2').replace(/([A-Z]+)([A-Z][a-z])/g,'$1 $2');
@@ -5423,7 +5423,7 @@ function patternFileKey(name){
   s = s.replace(/ (the|a|an|and|by) /g,' ').replace(/ (the|a|an|and|by) /g,' ');
   return s.trim().replace(/\s+/g,' ');
 }
-// Two keys belong together when one's words start the other's ('venus' + 'venus full set').
+// Two keys belong together when one's words start the other's ('juniper' + 'juniper full set').
 function patternKeysMatch(a, b){
   if(!a || !b) return false;
   const x = a.split(' '), y = b.split(' ');
@@ -5440,7 +5440,10 @@ function bulkPatternName(fileName, foundName){
   const fits = n && patternFileKey(n).split(' ').some(w => words.has(w));
   if(!fits) n = String(fileName||'').replace(/(\.pdf)+$/i,'').replace(/\.[a-z0-9]{2,4}$/i,'').replace(/([a-z])([A-Z])/g,'$1 $2')
     .replace(/[_]+/g,' ').replace(/\b(look ?book|crochet pattern|knitting pattern|pattern|v\d+)\b/gi,'').replace(/\s+/g,' ').trim();
-  if(n && n === n.toUpperCase()) n = n.toLowerCase().replace(/\b[a-z]/g, c => c.toUpperCase());
+  // A generic file name ('pattern.pdf') leaves nothing: use the PDF's own title.
+  if(!n) n = String(foundName||'').split(/ [-–|] /)[0].replace(/\s+/g,' ').trim();
+  if(!n) return 'Untitled pattern';
+  if(n === n.toUpperCase()) n = n.toLowerCase().replace(/\b[a-z]/g, c => c.toUpperCase());
   return n.charAt(0).toUpperCase() + n.slice(1);
 }
 /* Group files into patterns. items: [{ name, size, foundName }].
@@ -5492,6 +5495,7 @@ function startBulkPatternImport(fileList){
   for(const file of files){
     const isPdf = /pdf/i.test(file.type||'') || /\.pdf$/i.test(file.name||'');
     if(!isPdf && !isAcceptableImageFile(file)){ wgToast(`${file.name}: only PDFs and images can be added.`, 'error'); continue; }
+    if(!isPdf && file.size > PATTERN_FILE_MAX){ wgToast(`${file.name} is over ${Math.round(PATTERN_FILE_MAX/1048576)} MB.`, 'error'); continue; }
     items.push({ file, name: file.name || 'pattern', size: file.size || 0, isPdf, over: file.size > PATTERN_FILE_MAX, res: null });
   }
   if(!items.length) return;
@@ -5566,7 +5570,8 @@ function renderBulkPatterns(){
 }
 async function saveBulkPatterns(){
   const b = bulkPatterns; if(!b || b.phase !== 'review') return;
-  const groups = b.groups.filter(g => g.include && g.items.length && (g.existingId || String(g.name||'').trim()));
+  const groups = b.groups.filter(g => g.include && g.items.length);
+  groups.forEach(g => { if(!g.existingId && !String(g.name||'').trim()) g.name = 'Untitled pattern'; });
   if(!groups.length) return;
   b.phase = 'saving'; b.done = 0; b.total = groups.reduce((n,g) => n + g.items.length, 0);
   renderTab();
