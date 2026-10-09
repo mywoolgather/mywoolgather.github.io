@@ -1679,6 +1679,7 @@ function renderYarnForm(){
       <input id="yf-line" required placeholder="Rios" value="${editing ? esc(editing.line ?? editing.name ?? '') : ''}" list="yf-line-history" onchange="autofillFromHistory()" />
       <datalist id="yf-line-history">${[...new Set(STATE.yarns.map(y=>y.line).filter(Boolean))].map(l=>`<option value="${esc(l)}"></option>`).join('')}</datalist>
     </label>
+    <div class="span2" style="margin-top:-4px;"><button type="button" class="btn btn-ghost btn-small" onclick="lookupYarnOnRavelry()" title="Find this yarn on Ravelry to fill in weight, fiber and skein size">Look up on Ravelry</button></div>
     <label class="field">Colorway
       <input id="yf-colorway" placeholder="Ravelry Red" value="${v('colorway')}" />
     </label>
@@ -5395,6 +5396,7 @@ function showPatternForm(id){
   pendingPatternFiles = editing ? (editing.files||[]).map(f=>({ ...f })) : [];
   pendingPatternCover = editing ? (editing.coverUrl || null) : null;
   pendingPatternSizes = editing ? (editing.sizes||[]).map(x=>({ ...x })) : [];
+  pendingPatternPhotos = editing ? [...(editing.photoUrls||[])] : [];
   pendingPatternUploads = [];
   pendingPatternRemovals = [];
   render();
@@ -5404,7 +5406,7 @@ function hidePatternForm(){ cleanupOpenForms(); renderTab(); }
 // discarded (they were never saved anywhere).
 function discardPatternDraftFiles(){
   pendingPatternUploads.forEach(url => window.FB.deletePhoto(url));
-  pendingPatternFiles = []; pendingPatternUploads = []; pendingPatternRemovals = []; pendingPatternCover = null; pendingPatternSizes = [];
+  pendingPatternFiles = []; pendingPatternUploads = []; pendingPatternRemovals = []; pendingPatternCover = null; pendingPatternSizes = []; pendingPatternPhotos = [];
 }
 function buildPatternFilesHTML(){
   if(!pendingPatternFiles.length) return '';
@@ -5427,21 +5429,23 @@ function patternFileStorageUrls(f){
 }
 /* The cover: the chosen image if it's still there, else the first one any
    file offers. 'none' means the person turned the cover off. */
-function resolvePatternCover(files, chosen){
+function resolvePatternCover(files, chosen, photoUrls){
   if(chosen === 'none') return null;
-  const all = (files||[]).flatMap(patternFilePreviews);
+  const all = [...(files||[]).flatMap(patternFilePreviews), ...(photoUrls||[])];
   return all.includes(chosen) ? chosen : (all[0] || null);
 }
-function patternCoverUrl(pat){ return resolvePatternCover(pat.files, pat.coverUrl); }
+function patternCoverUrl(pat){ return resolvePatternCover(pat.files, pat.coverUrl, pat.photoUrls); }
+let pendingPatternPhotos = [];       // photo URLs from elsewhere (Ravelry) offered as covers
+function pendingCoverOptions(){ return [...pendingPatternFiles.flatMap(patternFilePreviews), ...pendingPatternPhotos]; }
 // The thumbnail a file shows in lists: the cover if it came from this file.
 function patternFilePreview(f, cover){
   const list = patternFilePreviews(f);
   return cover && list.includes(cover) ? cover : (list[0] || null);
 }
 function buildPatternCoverPickerHTML(){
-  const all = pendingPatternFiles.flatMap(patternFilePreviews);
+  const all = pendingCoverOptions();
   if(!all.length) return '';
-  const current = resolvePatternCover(pendingPatternFiles, pendingPatternCover);
+  const current = resolvePatternCover(pendingPatternFiles, pendingPatternCover, pendingPatternPhotos);
   return `<span class="note field-label" style="display:block; margin-top:10px;">Cover image</span>
     <div class="cover-picker" role="radiogroup" aria-label="Cover image">
       ${all.map((u,i)=>`<button type="button" role="radio" aria-checked="${u===current}" class="cover-option ${u===current?'selected':''}" onclick="pickPatternCover(${i})" aria-label="Use image ${i+1} as the cover"><img src="${esc(u)}" alt="" loading="lazy" /></button>`).join('')}
@@ -5449,7 +5453,7 @@ function buildPatternCoverPickerHTML(){
     </div>`;
 }
 function pickPatternCover(i){
-  pendingPatternCover = i < 0 ? 'none' : (pendingPatternFiles.flatMap(patternFilePreviews)[i] || null);
+  pendingPatternCover = i < 0 ? 'none' : (pendingCoverOptions()[i] || null);
   refreshPatternFiles();
 }
 function refreshPatternFiles(){
@@ -5642,6 +5646,151 @@ function mergePdfFindings(pat, found){
   if(f.gauge && !(pat.gauge && (pat.gauge.sts || pat.gauge.rows))){ out.gauge = { ...f.gauge }; changed = true; }
   out.changed = changed;
   return out;
+}
+/* ---------- Ravelry ----------
+   Lookups go through window.FB.ravelry (a Cloud Function holds the API key).
+   The mapping from Ravelry's data to Woolgather's fields is plain rules. */
+// Pure: Ravelry's weight names ('DK (8 ply, 11 wpi)', 'Aran', 'Light Fingering'…) → WEIGHTS.
+function ravelryWeight(name){
+  const s = String(name||'').toLowerCase();
+  if(!s || /any gauge/.test(s)) return null;
+  if(/super bulky|jumbo|super chunky/.test(s)) return 'Super Bulky';
+  if(/bulky|chunky/.test(s)) return 'Bulky';
+  if(/\bdk\b|light worsted/.test(s)) return 'DK';
+  if(/worsted|aran/.test(s)) return 'Worsted';
+  if(/sport/.test(s)) return 'Sport';
+  if(/fingering/.test(s)) return 'Fingering';
+  if(/lace|cobweb|thread/.test(s)) return 'Lace';
+  return null;
+}
+// Pure: Ravelry's average difficulty (1–10) → Woolgather skill level.
+function ravelrySkill(avg){
+  const d = Number(avg);
+  if(!d) return null;
+  return d < 2.5 ? 'Beginner' : d < 4.5 ? 'Easy' : d < 7 ? 'Intermediate' : 'Experienced';
+}
+/* Pure: a Ravelry pattern (as trimmed by the Cloud Function) → pattern
+   details. Gauge is given per gaugeDivisor inches; scaled to 4 in. Yardage
+   is a min–max across sizes: the largest is used, so the stash check never
+   promises too little, and the range is kept for the notes. */
+function ravelryPatternFields(p){
+  if(!p) return null;
+  const per4 = v => (Number(v) > 0 && Number(p.gaugeDivisor) > 0) ? Math.round(Number(v) * 4 / Number(p.gaugeDivisor) * 10) / 10 : null;
+  const sts = per4(p.gauge), rows = per4(p.rowGauge);
+  const min = Number(p.yardage) || null, max = Number(p.yardageMax) || null;
+  return {
+    name: p.name || null,
+    designer: p.designer || null,
+    craft: p.craft === 'knitting' ? 'knit' : p.craft === 'crochet' ? 'crochet' : null,
+    weightCategory: ravelryWeight(p.weight),
+    yardage: max || min,
+    yardageRange: min && max && max > min ? [min, max] : null,
+    sizesText: p.sizes || null,
+    gauge: (sts || rows) ? { sts, rows, unit: 'in' } : null,
+    needleSize: (p.needles||[]).map(n => n.name).filter(Boolean).slice(0, 3).join(', ') || null,
+    skillLevel: ravelrySkill(p.difficulty),
+    sourceUrl: p.permalink ? `https://www.ravelry.com/patterns/library/${p.permalink}` : null,
+    photos: (p.photos && p.photos.length ? p.photos : [p.photo]).filter(Boolean).slice(0, 4)
+  };
+}
+// Pure: a Ravelry yarn → stash yarn details.
+function ravelryYarnFields(y){
+  if(!y) return null;
+  const fibers = (y.fibers||[]).filter(f => f.name).map(f => (f.pct ? `${f.pct}% ` : '') + f.name).join(', ');
+  return {
+    brand: y.company || null,
+    line: y.name || null,
+    weightCategory: ravelryWeight(y.weight),
+    skeinYardage: Number(y.yardage) || null,
+    skeinWeightGrams: Number(y.grams) || null,
+    fiber: fibers || null
+  };
+}
+function ravelryLink(url){
+  const m = String(url||'').match(/ravelry\.com\/patterns\/library\/([a-z0-9-]+)/i);
+  return m ? m[1] : null;
+}
+function ravelryError(err){
+  console.warn('Ravelry lookup failed', err);
+  const code = String(err && err.code || '');
+  if(/not-found/.test(code) && /Ravelry/.test(err.message||'')) return err.message;
+  if(/not-found|internal|unavailable/.test(code) && !/Ravelry/.test(err.message||'')) return "Ravelry lookups aren't available right now.";
+  return (err && err.message) || "Couldn't reach Ravelry.";
+}
+async function fillPatternFromRavelry(){
+  if(!STATE.online){ wgToast("You're offline — Ravelry needs a connection.", 'error'); return; }
+  const urlEl = document.getElementById('patf-url');
+  const permalink = ravelryLink(urlEl && urlEl.value);
+  const note = document.getElementById('patf-pdf-note');
+  try{
+    let params;
+    if(permalink) params = { permalink };
+    else {
+      const nameEl = document.getElementById('patf-name');
+      const q = await wgPrompt('Search Ravelry for a pattern by name (or paste its Ravelry link in Source link).', { title:'Fill from Ravelry', defaultValue: (nameEl && nameEl.value) || '', okLabel:'Search', placeholder:'e.g. Flax sweater' });
+      if(!q || !q.trim()) return;
+      if(note) note.textContent = 'Searching Ravelry…';
+      const r = await window.FB.ravelry('searchPatterns', { query: q.trim().slice(0, 100) });
+      if(note) note.textContent = '';
+      if(!r.patterns || !r.patterns.length){ wgToast('No patterns found on Ravelry for that.'); return; }
+      const pick = await wgChoose('', { title:'Which one?', choices: r.patterns.map(p => ({
+        label: p.name, value: p.id,
+        detail: [p.designer && `by ${p.designer}`, p.weight, p.yardage && `${toDisplayLength(p.yardage).toLocaleString()} ${unitLabel()}+`].filter(Boolean).join(' · ') })) });
+      if(!pick) return;
+      params = { id: pick };
+    }
+    if(note) note.textContent = 'Reading from Ravelry…';
+    const { pattern } = await window.FB.ravelry('pattern', params);
+    if(note) note.textContent = '';
+    applyRavelryPattern(ravelryPatternFields(pattern));
+  }catch(err){
+    if(note) note.textContent = '';
+    wgToast(ravelryError(err), 'error');
+  }
+}
+// Fill the open pattern form from Ravelry: empty fields only (as with PDFs).
+function applyRavelryPattern(f){
+  if(!f) return;
+  const urlEl = document.getElementById('patf-url');
+  if(urlEl && !urlEl.value.trim() && f.sourceUrl) urlEl.value = f.sourceUrl;
+  const notesEl = document.getElementById('patf-notes');
+  const extra = [f.sizesText && `Sizes: ${f.sizesText}`,
+    f.yardageRange && `Ravelry yardage: ${toDisplayLength(f.yardageRange[0]).toLocaleString()}–${toDisplayLength(f.yardageRange[1]).toLocaleString()} ${unitLabel()} across sizes (the largest is used above — add per-size amounts under Sizes if you have them).`].filter(Boolean).join('\n');
+  if(notesEl && extra && !notesEl.value.trim()) notesEl.value = extra;
+  if(f.photos.length){
+    pendingPatternPhotos = [...new Set([...pendingPatternPhotos, ...f.photos])];
+    refreshPatternFiles();
+  }
+  applyPdfFindings({ found: { ...f, sizes: null }, hasText: true }, 'Ravelry');
+}
+async function lookupYarnOnRavelry(){
+  if(!STATE.online){ wgToast("You're offline — Ravelry needs a connection.", 'error'); return; }
+  const val = id => (document.getElementById(id)||{}).value || '';
+  let q = `${val('yf-brand')} ${val('yf-line')}`.trim();
+  if(!q){
+    q = await wgPrompt('Search Ravelry for a yarn by brand and name.', { title:'Look up on Ravelry', okLabel:'Search', placeholder:'e.g. Malabrigo Rios' });
+    if(!q || !q.trim()) return;
+  }
+  try{
+    const r = await window.FB.ravelry('searchYarns', { query: q.trim().slice(0, 100) });
+    if(!r.yarns || !r.yarns.length){ wgToast(`No yarns found on Ravelry for "${q}".`); return; }
+    const pick = await wgChoose('', { title:'Which yarn?', choices: r.yarns.map(y => ({
+      label: [y.company, y.name].filter(Boolean).join(' '), value: y.id,
+      detail: [y.weight, y.yardage && y.grams ? `${toDisplayLength(y.yardage)} ${unitLabel()} / ${y.grams} g` : null, y.discontinued && 'discontinued'].filter(Boolean).join(' · ') })) });
+    if(!pick) return;
+    const { yarn } = await window.FB.ravelry('yarn', { id: pick });
+    const f = ravelryYarnFields(yarn);
+    const filled = [];
+    const fill = (id, v, label) => { const e = document.getElementById(id); if(e && v != null && v !== '' && !String(e.value).trim()){ e.value = v; filled.push(label); } };
+    fill('yf-brand', f.brand, 'brand');
+    fill('yf-line', f.line, 'name');
+    fill('yf-fiber', f.fiber, 'fiber');
+    fill('yf-skeinweight', f.skeinWeightGrams, 'skein weight');
+    fill('yf-skeinyardage', f.skeinYardage ? toDisplayLength(f.skeinYardage) : null, 'skein length');
+    // You picked this exact yarn, so its weight is set even though the menu always has one.
+    if(f.weightCategory){ const w = document.getElementById('yf-weightcat'); if(w && w.value !== f.weightCategory){ w.value = f.weightCategory; filled.push('weight'); } }
+    wgToast(filled.length ? `Filled from Ravelry: ${filled.join(', ')}.` : 'Nothing new to fill from Ravelry.', filled.length ? 'success' : undefined);
+  }catch(err){ wgToast(ravelryError(err), 'error'); }
 }
 /* ---------- Bulk add patterns ----------
    Pick many PDFs/images at once. Each PDF is read in the browser first
@@ -5900,9 +6049,13 @@ function renderPatternForm(){
       <span id="patf-pdf-note" class="note" style="font-size:0.75rem; display:block;" aria-live="polite"></span>
       <div id="patf-files">${buildPatternFilesHTML() + buildPatternCoverPickerHTML()}</div>
     </div>
-    <label class="field span2">Source link (optional)
-      <input id="patf-url" type="url" placeholder="https://www.ravelry.com/patterns/library/…" value="${v('sourceUrl')}" />
-    </label>
+    <div class="field span2">
+      <label for="patf-url">Source link (optional)</label>
+      <div style="display:flex; gap:6px; flex-wrap:wrap;">
+        <input id="patf-url" type="url" placeholder="https://www.ravelry.com/patterns/library/…" value="${v('sourceUrl')}" style="flex:1; min-width:200px;" />
+        <button type="button" class="btn btn-ghost btn-small" onclick="fillPatternFromRavelry()" title="Paste a Ravelry pattern link, or search Ravelry by name">Fill from Ravelry</button>
+      </div>
+    </div>
     <label class="field">Yarn weight (optional)
       <select id="patf-weight"><option value="">—</option>${WEIGHTS.map(w=>`<option value="${w}" ${editing&&editing.weightCategory===w?'selected':''}>${esc(weightLabel(w))}</option>`).join('')}</select>
     </label>
@@ -5969,7 +6122,8 @@ function handleSavePattern(e){
     notes: document.getElementById('patf-notes').value.trim() || null,
     files: pendingPatternFiles.map(f=>({ ...f })),
     sizes: cleanPatternSizes(pendingPatternSizes),
-    coverUrl: pendingPatternCover === 'none' ? 'none' : (resolvePatternCover(pendingPatternFiles, pendingPatternCover) || null),
+    photoUrls: [...pendingPatternPhotos],
+    coverUrl: pendingPatternCover === 'none' ? 'none' : (resolvePatternCover(pendingPatternFiles, pendingPatternCover, pendingPatternPhotos) || null),
     updatedAt: new Date().toISOString()
   };
   if(existing){
@@ -5979,7 +6133,7 @@ function handleSavePattern(e){
   }
   // Files removed on the form are only deleted now that the change is saved.
   pendingPatternRemovals.forEach(url => window.FB.deletePhoto(url));
-  pendingPatternFiles = []; pendingPatternUploads = []; pendingPatternRemovals = []; pendingPatternCover = null; pendingPatternSizes = [];
+  pendingPatternFiles = []; pendingPatternUploads = []; pendingPatternRemovals = []; pendingPatternCover = null; pendingPatternSizes = []; pendingPatternPhotos = [];
   persist();
   STATE.showPatternForm = false;
   STATE.editingPatternId = null;
@@ -6216,8 +6370,10 @@ function renderPatternCard(pat){
   const projects = STATE.projects.filter(p=>p.patternId===pat.id);
   const cover = patternCoverUrl(pat);
   const coverFile = cover && (pat.files||[]).find(f=>patternFilePreviews(f).includes(cover));
+  // A cover from Ravelry links to the pattern's page there, with credit.
+  const coverHref = coverFile ? coverFile.url : (pat.sourceUrl || cover);
   return `<div class="card pattern-card">
-    ${cover ? `<a class="pattern-cover" href="${esc(coverFile.url)}" target="_blank" rel="noopener" aria-label="Open ${esc(coverFile.name)}"><img src="${esc(cover)}" alt="" loading="lazy" /></a>` : ''}
+    ${cover ? `<a class="pattern-cover" href="${esc(coverHref)}" target="_blank" rel="noopener" aria-label="Open ${esc(coverFile ? coverFile.name : pat.name)}"><img src="${esc(cover)}" alt="" loading="lazy" />${coverFile ? '' : '<span class="cover-credit">Photo: Ravelry</span>'}</a>` : ''}
     <p class="project-name pattern-title">${esc(pat.name)}</p>
     ${pat.designer ? `<p class="note no-margin pattern-designer">by ${esc(pat.designer)}</p>` : ''}
     <select class="status-select pattern-status" onchange="updatePatternStatus('${pat.id}', this.value)" aria-label="Pattern status">

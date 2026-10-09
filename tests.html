@@ -417,6 +417,22 @@
     ok('up next: allocated yarn not counted; none of that weight → not ready', up.find(m=>m.pattern.id==='q3').ready===false && up.find(m=>m.pattern.id==='q3').yarn===null);
   }catch(e){ ok('connected tabs block threw: '+e.message, false); }
 
+  // --- Ravelry → Woolgather fields ---
+  try{
+    ok('ravelry weight names', ravelryWeight('DK (8 ply, 11 wpi)')==='DK' && ravelryWeight('Aran')==='Worsted' && ravelryWeight('Light Fingering')==='Fingering' && ravelryWeight('Super Bulky (5-6 ply)')==='Super Bulky' && ravelryWeight('Cobweb')==='Lace' && ravelryWeight('Any gauge - designed for any gauge')===null);
+    ok('ravelry difficulty → skill', ravelrySkill(1.8)==='Beginner' && ravelrySkill(4.2)==='Easy' && ravelrySkill(6)==='Intermediate' && ravelrySkill(8)==='Experienced' && ravelrySkill(0)===null);
+    const f = ravelryPatternFields({ name:'Sample Tee', permalink:'sample-tee', designer:'D', craft:'knitting', yardage:820, yardageMax:1450, weight:'DK (8 ply, 11 wpi)',
+      sizes:'XS (S, M)', gauge:11, rowGauge:15, gaugeDivisor:2, needles:[{ name:'US 6 - 4.0 mm' }, { name:'US 4 - 3.5 mm' }], difficulty:4.2, photos:['a.jpg','b.jpg'] });
+    ok('ravelry pattern: gauge per 2 in scaled to 4 in', f.gauge.sts===22 && f.gauge.rows===30 && f.gauge.unit==='in');
+    ok('ravelry pattern: largest yardage used, range kept', f.yardage===1450 && f.yardageRange[0]===820 && f.yardageRange[1]===1450);
+    ok('ravelry pattern: craft, weight, needles, link, photos', f.craft==='knit' && f.weightCategory==='DK' && f.needleSize==='US 6 - 4.0 mm, US 4 - 3.5 mm' && f.sourceUrl==='https://www.ravelry.com/patterns/library/sample-tee' && f.photos.length===2);
+    ok('ravelry pattern: no gauge or divisor → no gauge', ravelryPatternFields({ name:'X', gauge:20, gaugeDivisor:null }).gauge===null);
+    const y = ravelryYarnFields({ company:'Demo Co', name:'Merino DK', weight:'DK', yardage:231, grams:100, fibers:[{ pct:80, name:'Merino' }, { pct:20, name:'Nylon' }] });
+    ok('ravelry yarn: brand, line, weight, skein, fiber', y.brand==='Demo Co' && y.line==='Merino DK' && y.weightCategory==='DK' && y.skeinYardage===231 && y.skeinWeightGrams===100 && y.fiber==='80% Merino, 20% Nylon');
+    ok('ravelry link → permalink', ravelryLink('https://www.ravelry.com/patterns/library/sample-tee?utm=x')==='sample-tee' && ravelryLink('https://example.com/p')===null);
+    ok('cover: photo URLs from elsewhere count as options', resolvePatternCover([], null, ['r.jpg'])==='r.jpg' && resolvePatternCover([{ url:'b.jpg', type:'image/jpeg' }], 'r.jpg', ['r.jpg'])==='r.jpg');
+  }catch(e){ ok('ravelry block threw: '+e.message, false); }
+
   // --- closenessPercent monotonic ---
   try{
     ok('closeness identical = 100', closenessPercent(0) === 100);

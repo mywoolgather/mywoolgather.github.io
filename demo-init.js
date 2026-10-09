@@ -133,7 +133,21 @@
     async uploadPatternFile(uid, patternId, blob){ return URL.createObjectURL(blob); },
     async deletePhoto(){ return; },
     async deleteAccount(){ return; },        // no-op in demo
-    async sendSupport(){ return; }
+    async sendSupport(){ return; },
+    // Ravelry lookups: the demo answers with made-up sample data (no account,
+    // no network) so the "Fill from Ravelry" buttons can be tried.
+    async ravelry(action, params){
+      const pattern = { id: 1, name: 'Sample Raglan Tee', permalink: 'sample-raglan-tee', designer: 'Demo Designs', craft: 'knitting',
+        yardage: 820, yardageMax: 1450, weight: 'DK (8 ply, 11 wpi)', sizes: 'XS (S, M, L, XL)', gauge: 22, rowGauge: 30, gaugeDivisor: 4,
+        needles: [{ name: 'US 6 - 4.0 mm', metric: 4, us: '6' }], difficulty: 4.2, photos: [], photo: null };
+      const yarn = { id: 2, name: 'Sample Merino DK', permalink: 'sample-merino-dk', company: 'Demo Yarn Co.', weight: 'DK', yardage: 231, grams: 100,
+        discontinued: false, photo: null, fibers: [{ pct: 100, name: 'Merino' }] };
+      if(action === 'searchPatterns') return { patterns: [pattern] };
+      if(action === 'pattern') return { pattern };
+      if(action === 'searchYarns') return { yarns: [yarn] };
+      if(action === 'yarn') return { yarn };
+      throw new Error('Unknown action');
+    }
   };
 
   // Signal readiness exactly like firebase-init.js does.

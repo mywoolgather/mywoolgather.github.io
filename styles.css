@@ -730,3 +730,6 @@ textarea{ resize:vertical; }
 /* Brief highlight when jumping to a project from elsewhere */
 .project-row.flash{ animation: wg-flash 1.8s ease; }
 @keyframes wg-flash{ 0%,40%{ background:color-mix(in srgb, var(--lilac) 22%, transparent); } 100%{ background:transparent; } }
+
+.pattern-cover{ position:relative; }
+.cover-credit{ position:absolute; right:6px; bottom:6px; font-size:0.62rem; background:rgba(0,0,0,.55); color:#fff; padding:1px 6px; border-radius:4px; }
