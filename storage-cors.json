@@ -1,0 +1,7 @@
+[
+  {
+    "origin": ["https://mywoolgather.com", "https://www.mywoolgather.com", "https://mywoolgather.github.io"],
+    "method": ["GET"],
+    "maxAgeSeconds": 3600
+  }
+]
