@@ -140,6 +140,16 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/fireba
     async sendSupport(payload){
       const id = 'msg_' + Date.now() + '_' + Math.random().toString(36).slice(2,8);
       await setDoc(doc(db, 'support', id), payload);
+    },
+    /* Ravelry lookups via the 'ravelry' Cloud Function (functions/index.js),
+       which holds the API key. action: 'searchPatterns' {query} | 'pattern'
+       {id|permalink} | 'searchYarns' {query} | 'yarn' {id}. The Functions SDK
+       is loaded only the first time this is used. */
+    async ravelry(action, params){
+      const { getFunctions, httpsCallable } = await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js");
+      const call = httpsCallable(getFunctions(app), 'ravelry');
+      const res = await call({ action, ...(params || {}) });
+      return res.data;
     }
   };
 
