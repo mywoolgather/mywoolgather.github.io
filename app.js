@@ -4625,9 +4625,13 @@ async function analyzePatternPdf(file, opts = {}){
     }
     // Preview options, best first: the biggest photos, then page 1 as a whole
     // (the person picks which one the card shows).
-    found.sort((a,b) => b.score - a.score);
+    // Background textures, blank boxes and logos are left out or ranked last.
+    for(const f of found){
+      try{ Object.assign(f, previewImageStats(f.img)); }catch(e){ Object.assign(f, { std: 255, mean: 128, white: 0, sat: 40 }); }
+    }
+    const ranked = rankPreviewCandidates(found);
     const thumbs = [];
-    for(const f of found.slice(0, PDF_MAX_PREVIEWS - 1)){
+    for(const f of ranked.slice(0, PDF_MAX_PREVIEWS - 1)){
       const blob = await pdfImageToJpeg(f.img).catch(() => null);
       if(blob) thumbs.push(blob);
     }
@@ -4724,21 +4728,62 @@ function pdfObject(page, id){
     catch(e){ clearTimeout(timer); resolve(null); }
   });
 }
-function pdfImageToJpeg(img){
+// A PDF image object drawn onto a canvas (or its bitmap as is).
+function pdfImageToSource(img){
   const w = img.width || (img.bitmap && img.bitmap.width), h = img.height || (img.bitmap && img.bitmap.height);
-  let src;
-  if(img.bitmap) src = img.bitmap;
-  else {
-    src = document.createElement('canvas');
-    src.width = w; src.height = h;
-    let rgba = img.data;
-    if(img.kind === 2){                        // RGB → RGBA
-      rgba = new Uint8ClampedArray(w*h*4);
-      for(let p = 0, q = 0; p < w*h*3; p += 3, q += 4){ rgba[q]=img.data[p]; rgba[q+1]=img.data[p+1]; rgba[q+2]=img.data[p+2]; rgba[q+3]=255; }
-    }
-    src.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, w*h*4), w, h), 0, 0);
+  if(img.bitmap) return { src: img.bitmap, w, h };
+  const src = document.createElement('canvas');
+  src.width = w; src.height = h;
+  let rgba = img.data;
+  if(img.kind === 2){                        // RGB → RGBA
+    rgba = new Uint8ClampedArray(w*h*4);
+    for(let p = 0, q = 0; p < w*h*3; p += 3, q += 4){ rgba[q]=img.data[p]; rgba[q+1]=img.data[p+1]; rgba[q+2]=img.data[p+2]; rgba[q+3]=255; }
   }
+  src.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, w*h*4), w, h), 0, 0);
+  return { src, w, h };
+}
+function pdfImageToJpeg(img){
+  const { src, w, h } = pdfImageToSource(img);
   return canvasToJpeg(src, w, h);
+}
+/* Pure: RGBA pixels (over white) → luminance spread and mean, share of
+   near-white pixels and mean colour saturation (0–255). Photos have contrast
+   and colour; paper textures, blank boxes and washed-out overlays have
+   neither; logos and stitch diagrams are mostly white and grey. */
+function previewPixelStats(rgba){
+  const n = Math.floor(rgba.length / 4);
+  if(!n) return { std: 0, mean: 255, white: 1, sat: 0 };
+  let sum = 0, sq = 0, white = 0, sat = 0;
+  for(let i = 0; i < n; i++){
+    const a = rgba[i*4+3] / 255, bg = 255 * (1 - a);
+    const r = rgba[i*4]*a + bg, g = rgba[i*4+1]*a + bg, b = rgba[i*4+2]*a + bg;
+    const lum = 0.299*r + 0.587*g + 0.114*b;
+    const hi = Math.max(r,g,b), lo = Math.min(r,g,b);
+    sum += lum; sq += lum*lum;
+    if(lum > 235) white++;
+    if(hi > 0) sat += (hi - lo) / hi * 255;
+  }
+  const mean = sum / n;
+  return { std: Math.sqrt(Math.max(0, sq/n - mean*mean)), mean, white: white / n, sat: sat / n };
+}
+const PREVIEW_MIN_CONTRAST = 18;   // luminance std-dev (0–255) below which an image is background
+// Near-blank backgrounds: no contrast, or pale and colourless like paper.
+function isBackgroundImage(c){ return c.std < PREVIEW_MIN_CONTRAST || (c.mean > 215 && c.sat < 20 && c.white < 0.3); }
+/* Pure: drop backgrounds, rank mostly-white or colourless images (logos,
+   stitch charts) below photos. Items: { score, std, mean, white, sat }. */
+function rankPreviewCandidates(list){
+  return (list||[]).filter(c => !isBackgroundImage(c))
+    .map(c => ({ ...c, score: c.score * (1 - 0.7 * c.white) * (0.2 + 0.8 * Math.min(1, (c.sat == null ? 40 : c.sat) / 40)) }))
+    .sort((a,b) => b.score - a.score);
+}
+function previewImageStats(img){
+  const { src, w, h } = pdfImageToSource(img);
+  const k = 64 / Math.max(w, h, 1);
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(w*k)); c.height = Math.max(1, Math.round(h*k));
+  const ctx = c.getContext('2d');
+  ctx.drawImage(src, 0, 0, c.width, c.height);
+  return previewPixelStats(ctx.getImageData(0, 0, c.width, c.height).data);
 }
 async function renderPdfPageToJpeg(page){
   const base = page.getViewport({ scale: 1 });

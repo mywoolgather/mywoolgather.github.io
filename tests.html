@@ -341,6 +341,26 @@
     const m = mergeFoundDetails([{ name:'A', designer:null, craft:'crochet', yardage:684, needleSize:'4 mm' }, { designer:'@x', craft:'knit', yardage:415, needleSize:'8 mm', weightCategory:'DK' }]);
     ok('bulk details: first file wins, later files fill gaps', m.yardage===684 && m.needleSize==='4 mm' && m.designer==='@x' && m.weightCategory==='DK' && m.craft==='crochet');
   }catch(e){ ok('bulk add block threw: '+e.message, false); }
+  // --- PDF preview images: skip backgrounds, rank logos last ---
+  try{
+    const px = (n, f) => { const a = new Uint8ClampedArray(n*4); for(let i=0;i<n;i++){ const [r,g,b,al] = f(i); a.set([r,g,b,al], i*4); } return a; };
+    const paper = previewPixelStats(px(400, i => { const v = 215 + (i%7); return [v,v-4,v-10,255]; }));
+    const photo = previewPixelStats(px(400, i => { const v = (i*37)%256; return [v, (v*3)%256, 255-v, 255]; }));
+    const logo = previewPixelStats(px(400, i => i%10===0 ? [20,20,20,255] : [255,255,255,255]));
+    const clear = previewPixelStats(px(400, () => [0,0,0,0]));
+    ok('preview stats: paper texture has almost no contrast', paper.std < PREVIEW_MIN_CONTRAST);
+    ok('preview stats: photo has contrast and little white', photo.std > 40 && photo.white < 0.2);
+    ok('preview stats: logo is mostly white', logo.white >= 0.89);
+    ok('preview stats: transparent counts as white', clear.white === 1 && clear.std === 0);
+    const r = rankPreviewCandidates([{ id:'paper', score:0.9, ...paper }, { id:'logo', score:0.5, ...logo }, { id:'photo', score:0.4, ...photo }]);
+    ok('preview rank: background dropped, photo beats a bigger logo', r.map(c=>c.id).join()==='photo,logo');
+    const notebook = previewPixelStats(px(400, i => i%20===0 ? [120,120,125,255] : [232,230,225,255]));
+    const chart = previewPixelStats(px(400, i => i%3===0 ? [90,90,90,255] : [255,255,255,255]));
+    ok('preview stats: pale colourless page counts as background', notebook.std >= PREVIEW_MIN_CONTRAST && isBackgroundImage(notebook));
+    ok('preview stats: photo is not background, has colour', !isBackgroundImage(photo) && photo.sat > 40);
+    const r2 = rankPreviewCandidates([{ id:'chart', score:0.86, ...chart }, { id:'photo', score:0.19, ...photo }]);
+    ok('preview rank: grey stitch chart ranks below a smaller colour photo', r2[0].id==='photo');
+  }catch(e){ ok('preview block threw: '+e.message, false); }
   // --- closenessPercent monotonic ---
   try{
     ok('closeness identical = 100', closenessPercent(0) === 100);
