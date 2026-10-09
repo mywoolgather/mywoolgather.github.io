@@ -363,6 +363,41 @@
     const r2 = rankPreviewCandidates([{ id:'chart', score:0.86, ...chart }, { id:'photo', score:0.19, ...photo }]);
     ok('preview rank: grey stitch chart ranks below a smaller colour photo', r2[0].id==='photo');
   }catch(e){ ok('preview block threw: '+e.message, false); }
+  // --- Restore from backup ---
+  try{
+    ok('backup: not a Woolgather file', !parseBackup({ app:'Other', yarns:[] }).ok && !parseBackup([1,2]).ok && !parseBackup(null).ok);
+    ok('backup: damaged list rejected', !parseBackup({ app:'Woolgather', yarns:'oops' }).ok);
+    const pb = parseBackup({ app:'Woolgather', exportedAt:'2026-10-01T00:00:00Z', yarns:[{id:'y1'},{id:'y2'}], patterns:[{id:'p1'}] });
+    ok('backup: missing lists become empty', pb.ok && pb.data.projects.length===0 && pb.data.yarns.length===2 && pb.exportedAt);
+    const cur = { yarns:[{id:'y1', name:'mine'}], projects:[], palettes:[], shoppingList:[{ note:'buy' }], patterns:[] };
+    const bk = { yarns:[{id:'y1', name:'old'},{id:'y2'}], projects:[{id:'pr'}], palettes:[], shoppingList:[{ note:'buy' },{ note:'other' }], patterns:[{id:'p1'}] };
+    const mg = mergeBackup(cur, bk, 'merge');
+    ok('backup merge: adds missing ids, keeps your version of the rest', mg.data.yarns.length===2 && mg.data.yarns[0].name==='mine' && mg.added.yarns===1 && mg.added.projects===1 && mg.added.patterns===1);
+    ok('backup merge: id-less items deduped by content', mg.data.shoppingList.length===2 && mg.added.shoppingList===1);
+    const rp = mergeBackup(cur, bk, 'replace');
+    ok('backup replace: takes the backup as is', rp.data.yarns.length===2 && rp.data.yarns[0].name==='old' && rp.data.shoppingList.length===2);
+  }catch(e){ ok('backup block threw: '+e.message, false); }
+
+  // --- Yarn → patterns, pattern → shopping ---
+  try{
+    const pats = [
+      { id:'a', name:'Tee', status:'saved', weightCategory:'DK', sizes:[{label:'S',yardage:800},{label:'M',yardage:950},{label:'L',yardage:1100}] },
+      { id:'b', name:'Cowl', status:'queued', weightCategory:'DK', yardage:300 },
+      { id:'c', name:'Hat', status:'saved', weightCategory:'Worsted', yardage:200 },
+      { id:'d', name:'Blanket', status:'saved', weightCategory:'DK', yardage:3000 },
+      { id:'e', name:'Mystery', status:'saved', weightCategory:'DK' }
+    ];
+    const fits = patternsForYarn({ weightCategory:'DK', yardageRemaining: 1000 }, pats);
+    ok('yarn → patterns: same weight with enough length, queued first', fits.map(m=>m.pattern.id).join()==='b,a');
+    ok('yarn → patterns: which sizes it covers', fits[1].covers==='S–M' && !fits[1].all && fits[0].all);
+    ok('yarn → patterns: no length left → none', patternsForYarn({ weightCategory:'DK', yardageRemaining: 0 }, pats).length===0);
+    const yarns = [{ id:'y1', yardageRemaining: 700 }, { id:'y2', yardageRemaining: 900 }];
+    const opts = patternShoppingOptions(1100, yarns);
+    ok('shopping: top up the yarn you have most of, or buy all new', opts.length===2 && opts[0].kind==='topup' && opts[0].yarn.id==='y2' && opts[0].yards===200 && opts[1].kind==='new' && opts[1].yards===1100);
+    ok('shopping: enough already → nothing to buy', patternShoppingOptions(800, yarns).length===0);
+    ok('shopping: no yarn of that weight → buy new only', patternShoppingOptions(500, []).map(o=>o.kind).join()==='new');
+  }catch(e){ ok('yarn/pattern shopping block threw: '+e.message, false); }
+
   // --- closenessPercent monotonic ---
   try{
     ok('closeness identical = 100', closenessPercent(0) === 100);

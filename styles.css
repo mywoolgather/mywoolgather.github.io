@@ -709,3 +709,14 @@ textarea{ resize:vertical; }
 .bulk-file-name{ min-width:0; overflow-wrap:anywhere; }
 .bulk-file-row select{ max-width:45%; flex-shrink:0; }
 @media (max-width:600px){ .bulk-file-row{ flex-direction:column; align-items:stretch; padding-left:0; } .bulk-file-row select{ max-width:none; } }
+
+/* Choice dialog */
+.wg-choices{ display:flex; flex-direction:column; gap:8px; margin:12px 0 4px; }
+.wg-choice{ flex-direction:column; align-items:flex-start; text-align:left; gap:2px; padding:10px 14px; }
+.wg-choice .note{ font-size:0.74rem; font-weight:400; }
+.btn-primary.wg-choice .note{ color:inherit; opacity:.85; }
+/* Patterns a stash yarn could make */
+.yarn-patterns{ margin-top:6px; font-size:0.72rem; }
+.yarn-patterns summary{ cursor:pointer; }
+.yarn-patterns ul{ margin:4px 0 0; padding-left:16px; }
+.yarn-patterns li{ margin:2px 0; }

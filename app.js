@@ -327,10 +327,34 @@ function wgConfirm(message, { title='Are you sure?', okLabel='Confirm', danger=f
     </div>`;
     const bd = document.getElementById('wg-modal-bd');
     requestAnimationFrame(()=> bd.classList.add('open'));
-    const close = (val)=>{ bd.classList.remove('open'); setTimeout(()=>{ root.innerHTML=''; }, 160); resolve(val); };
+    const close = (val)=>{ bd.classList.remove('open'); setTimeout(()=>{ bd.remove(); }, 160); resolve(val); };
     document.getElementById('wg-ok').onclick = ()=> close(true);
     document.getElementById('wg-cancel').onclick = ()=> close(false);
     bd.onclick = (e)=>{ if(e.target===bd) close(false); };
+  });
+}
+/* A dialog with several choices: resolves to the chosen value, or null if
+   dismissed. choices: [{ label, value, detail?, primary?, danger? }]. */
+function wgChoose(message, { title='', choices=[] } = {}){
+  return new Promise(resolve=>{
+    const root = document.getElementById('wg-modal-root');
+    root.innerHTML = `<div class="wg-modal-backdrop" id="wg-modal-bd">
+      <div class="wg-modal" role="dialog" aria-modal="true">
+        ${title?`<h3>${esc(title)}</h3>`:''}
+        ${message?`<p>${esc(message)}</p>`:''}
+        <div class="wg-choices">
+          ${choices.map((c,i)=>`<button class="btn ${c.primary?'btn-primary':'btn-ghost'} wg-choice" data-i="${i}" style="${c.danger?'color:var(--wine); border-color:var(--wine);':''}">
+            <span>${esc(c.label)}</span>${c.detail?`<span class="note">${esc(c.detail)}</span>`:''}</button>`).join('')}
+        </div>
+        <div class="wg-modal-actions"><button class="btn btn-ghost" id="wg-cancel">Cancel</button></div>
+      </div>
+    </div>`;
+    const bd = document.getElementById('wg-modal-bd');
+    requestAnimationFrame(()=> bd.classList.add('open'));
+    const close = (val)=>{ bd.classList.remove('open'); setTimeout(()=>{ bd.remove(); }, 160); resolve(val); };
+    bd.querySelectorAll('.wg-choice').forEach(b => b.onclick = () => close(choices[Number(b.dataset.i)].value));
+    document.getElementById('wg-cancel').onclick = ()=> close(null);
+    bd.onclick = (e)=>{ if(e.target===bd) close(null); };
   });
 }
 function wgPrompt(message, { title='', defaultValue='', okLabel='Save', placeholder='' } = {}){
@@ -350,7 +374,7 @@ function wgPrompt(message, { title='', defaultValue='', okLabel='Save', placehol
     const bd = document.getElementById('wg-modal-bd');
     const input = document.getElementById('wg-input');
     requestAnimationFrame(()=>{ bd.classList.add('open'); input.focus(); input.select(); });
-    const close = (val)=>{ bd.classList.remove('open'); setTimeout(()=>{ root.innerHTML=''; }, 160); resolve(val); };
+    const close = (val)=>{ bd.classList.remove('open'); setTimeout(()=>{ bd.remove(); }, 160); resolve(val); };
     document.getElementById('wg-ok').onclick = ()=> close(input.value);
     document.getElementById('wg-cancel').onclick = ()=> close(null);
     input.onkeydown = (e)=>{ if(e.key==='Enter') close(input.value); if(e.key==='Escape') close(null); };
@@ -1016,6 +1040,8 @@ function renderSettingsSheet(){
         </div>
         <button onclick="window.FB.signOutUser()">${ICONS.reset}<span>Sign out</span></button>
         <button onclick="closeSettings(); exportStash('json');">${ICONS.package}<span>Back up my data (JSON)</span></button>
+        <button onclick="document.getElementById('wg-restore-input').click()">${ICONS.upload}<span>Restore from a backup</span></button>
+        <input type="file" id="wg-restore-input" accept="application/json,.json" style="display:none;" onchange="restoreBackupFile(this.files[0]); closeSettings(); this.value='';" />
         <button onclick="closeSettings(); exportStash('csv');">${ICONS.package}<span>Export stash (CSV)</span></button>
         <button onclick="closeSettings(); resetAll();" class="danger-text">${ICONS.trash}<span>Clear my data</span></button>
         <div class="sheet-divider"></div>
@@ -1137,7 +1163,7 @@ function openTipJar(){
   </div>`;
   const bd = document.getElementById('wg-modal-bd');
   requestAnimationFrame(()=> bd.classList.add('open'));
-  const close = ()=>{ bd.classList.remove('open'); setTimeout(()=>{ root.innerHTML=''; }, 160); };
+  const close = ()=>{ bd.classList.remove('open'); setTimeout(()=>{ bd.remove(); }, 160); };
   document.getElementById('tip-close').onclick = close;
   bd.onclick = (e)=>{ if(e.target===bd) close(); };
 }
@@ -1161,7 +1187,7 @@ function openAbout(){
   </div>`;
   const bd = document.getElementById('wg-modal-bd');
   requestAnimationFrame(()=> bd.classList.add('open'));
-  const close = ()=>{ bd.classList.remove('open'); setTimeout(()=>{ root.innerHTML=''; }, 160); };
+  const close = ()=>{ bd.classList.remove('open'); setTimeout(()=>{ bd.remove(); }, 160); };
   document.getElementById('about-close').onclick = close;
   bd.onclick = (e)=>{ if(e.target===bd) close(); };
 }
@@ -1180,7 +1206,7 @@ function openSupportForm(){
   </div>`;
   const bd = document.getElementById('wg-modal-bd');
   requestAnimationFrame(()=> bd.classList.add('open'));
-  const close = ()=>{ bd.classList.remove('open'); setTimeout(()=>{ root.innerHTML=''; }, 160); };
+  const close = ()=>{ bd.classList.remove('open'); setTimeout(()=>{ bd.remove(); }, 160); };
   document.getElementById('support-cancel').onclick = close;
   bd.onclick = (e)=>{ if(e.target===bd) close(); };
   document.getElementById('support-send').onclick = async ()=>{
@@ -2105,6 +2131,79 @@ function downloadFile(filename, text, mime){
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(()=>URL.revokeObjectURL(url), 1000);
 }
+/* Restore from a JSON backup made by "Back up my data".
+   Two ways: add only what's missing (matched by id — nothing you have now is
+   changed or removed), or replace everything. Replacing first downloads a
+   backup of what's there now. Pattern files themselves aren't in a backup,
+   only links to them, so patterns whose files were deleted lose those files. */
+const BACKUP_KEYS = [['yarns','yarns'],['projects','projects'],['palettes','palettes'],['shoppingList','shopping list items'],['patterns','patterns']];
+const FIRESTORE_DOC_LIMIT = 1048576;   // bytes, one Firestore document
+// Pure: a parsed backup file → { ok, error?, data, exportedAt }
+function parseBackup(json){
+  if(!json || typeof json !== 'object' || Array.isArray(json)) return { ok:false, error:"This file isn't a Woolgather backup." };
+  if(json.app && json.app !== 'Woolgather') return { ok:false, error:"This file isn't a Woolgather backup." };
+  if(!BACKUP_KEYS.some(([k]) => Array.isArray(json[k]))) return { ok:false, error:"This backup has nothing in it to restore." };
+  const data = {};
+  for(const [k] of BACKUP_KEYS){
+    if(json[k] != null && !Array.isArray(json[k])) return { ok:false, error:`This backup looks damaged (${k} isn't a list).` };
+    data[k] = (json[k] || []).filter(x => x && typeof x === 'object');
+  }
+  return { ok:true, data, exportedAt: json.exportedAt || null };
+}
+// Pure: combine current data with a backup. mode 'merge' adds items whose id
+// isn't already there (items without an id are added unless an identical one
+// exists); 'replace' takes the backup as is. Returns { data, added }.
+function mergeBackup(current, backup, mode){
+  const data = {}, added = {};
+  for(const [k] of BACKUP_KEYS){
+    const cur = current[k] || [], incoming = backup[k] || [];
+    if(mode === 'replace'){ data[k] = incoming.map(x => ({ ...x })); added[k] = incoming.length; continue; }
+    const ids = new Set(cur.map(x => x.id).filter(Boolean));
+    const same = new Set(cur.filter(x => !x.id).map(x => JSON.stringify(x)));
+    const extra = incoming.filter(x => x.id ? !ids.has(x.id) : !same.has(JSON.stringify(x)));
+    data[k] = [...cur, ...extra.map(x => ({ ...x }))];
+    added[k] = extra.length;
+  }
+  return { data, added };
+}
+function currentBackupData(){
+  return { yarns: STATE.yarns, projects: STATE.projects, palettes: STATE.paletteSavedPalettes, shoppingList: STATE.shoppingList, patterns: STATE.patterns };
+}
+async function restoreBackupFile(file){
+  if(!file) return;
+  if(!STATE.online){ wgToast("You're offline — restoring needs a connection.", "error"); return; }
+  let parsed;
+  try{ parsed = parseBackup(JSON.parse(await file.text())); }
+  catch(e){ parsed = { ok:false, error:"This file isn't a Woolgather backup." }; }
+  if(!parsed.ok){ wgToast(parsed.error, 'error'); return; }
+  const count = d => BACKUP_KEYS.map(([k,l]) => `${(d[k]||[]).length} ${l}`).join(', ');
+  const when = parsed.exportedAt ? ` from ${new Date(parsed.exportedAt).toLocaleDateString()}` : '';
+  const merge = mergeBackup(currentBackupData(), parsed.data, 'merge');
+  const newCount = Object.values(merge.added).reduce((a,b)=>a+b, 0);
+  const mode = await wgChoose(`This backup${when} has ${count(parsed.data)}. You have ${count(currentBackupData())} now. Backups hold links to pattern files, not the files themselves.`, {
+    title: 'Restore from backup',
+    choices: [
+      { label: 'Add what’s missing', detail: newCount ? `Adds ${newCount} item${newCount===1?'':'s'} you don't have; nothing you have now changes` : 'Everything in it is already here', value: 'merge', primary: true },
+      { label: 'Replace everything', detail: 'Your current data is swapped for the backup (a copy of it downloads first)', value: 'replace', danger: true }
+    ]
+  });
+  if(!mode) return;
+  if(mode === 'merge' && !newCount){ wgToast('Nothing to add — everything in that backup is already here.'); return; }
+  const result = mode === 'merge' ? merge : mergeBackup(currentBackupData(), parsed.data, 'replace');
+  // All data lives in one Firestore document — refuse rather than fail to save.
+  const size = new Blob([JSON.stringify(result.data)]).size;
+  if(size > FIRESTORE_DOC_LIMIT * 0.95){ wgToast("That's too much to fit in your account at once — try 'Replace everything' instead, or contact support.", 'error'); return; }
+  if(mode === 'replace') exportStash('json');
+  cleanupOpenForms();
+  STATE.yarns = result.data.yarns.map(normalizeLegacyYarn);
+  STATE.projects = result.data.projects;
+  STATE.paletteSavedPalettes = result.data.palettes;
+  STATE.shoppingList = result.data.shoppingList;
+  STATE.patterns = result.data.patterns;
+  await persist();
+  render();
+  wgToast(mode === 'replace' ? 'Restored from your backup.' : `Added ${newCount} item${newCount===1?'':'s'} from your backup.`, 'success');
+}
 function exportStash(format){
   const stamp = todayStr();
   if(format==='json'){
@@ -2283,9 +2382,34 @@ function renderYarnCard(y){
       </button>
     </div>
     ${usageLine}
+    ${renderYarnPatternsLine(y)}
   </div>`;
 }
 
+/* Pure: library patterns this much of one yarn could make — same weight and
+   enough length for the single yardage or at least one size. Sorted with
+   queued patterns first. */
+function patternsForYarn(yarn, patterns){
+  const have = Number(yarn && yarn.yardageRemaining) || 0;
+  if(!yarn || !yarn.weightCategory || have <= 0) return [];
+  const rank = { queued:0, saved:1, made:2 };
+  return (patterns||[]).filter(p => p.weightCategory === yarn.weightCategory)
+    .map(p => {
+      const r = patternYardageRange(p);
+      if(!r || have < r.min) return null;
+      const covers = r.count ? patternSizesCovered(p.sizes, have) : null;
+      return { pattern: p, covers, all: have >= r.max };
+    }).filter(Boolean)
+    .sort((a,b) => (rank[a.pattern.status||'saved'] - rank[b.pattern.status||'saved']) || a.pattern.name.localeCompare(b.pattern.name));
+}
+function renderYarnPatternsLine(y){
+  const list = patternsForYarn(y, STATE.patterns);
+  if(!list.length) return '';
+  return `<details class="note yarn-patterns"><summary>📖 Enough for ${list.length} pattern${list.length===1?'':'s'}</summary>
+    <ul>${list.slice(0,10).map(m => `<li><button type="button" class="pattern-inline-link" onclick="openPatternInLibrary('${m.pattern.id}')">${esc(m.pattern.name)}</button>${m.covers ? ` <span class="note">· ${m.all ? 'any size' : esc(m.covers)}</span>` : ''}${m.pattern.status==='queued' ? ' <span class="note">· queued</span>' : ''}</li>`).join('')}</ul>
+    ${list.length>10 ? `<span class="note">…and ${list.length-10} more</span>` : ''}
+  </details>`;
+}
 function renderYarnScrapsLine(y){
   const scraps = yarnScraps(y);
   if(!scraps.length) return '';
@@ -3615,7 +3739,7 @@ function addShoppingItem(item){
     yardage: item.yardage || null,
     quantity: item.quantity || 1,
     note: item.note || null,
-    sourceType: item.sourceType || 'manual',   // 'project' | 'palette' | 'manual'
+    sourceType: item.sourceType || 'manual',   // 'project' | 'palette' | 'pattern' | 'manual'
     sourceId: item.sourceId || null,
     sourceName: item.sourceName || null,
     done: false,
@@ -5791,6 +5915,63 @@ function patternStashMatches(pat){
   const best = same.slice().sort((a,b)=>(Number(b.yardageRemaining)||0)-(Number(a.yardageRemaining)||0))[0] || null;
   return { enough, best, sameCount: same.length, need: r.min, sized: r.count > 0 };
 }
+/* Pure: ways to buy yarn for a pattern in one size. need: yards. Same-weight
+   stash yarns, best first. Returns [{ kind:'topup', yarn, yards } | { kind:'new', yards }]
+   — topping up the yarn you have most of (if it's short), or buying all new. */
+function patternShoppingOptions(need, sameWeightYarns){
+  const opts = [];
+  const best = (sameWeightYarns||[]).filter(y => (Number(y.yardageRemaining)||0) > 0)
+    .sort((a,b) => (Number(b.yardageRemaining)||0) - (Number(a.yardageRemaining)||0))[0];
+  if(best){
+    const short = need - (Number(best.yardageRemaining)||0);
+    if(short <= 0) return [];   // you already have enough
+    opts.push({ kind:'topup', yarn: best, yards: Math.ceil(short) });
+  }
+  opts.push({ kind:'new', yards: Math.ceil(need) });
+  return opts;
+}
+async function shopForPattern(id){
+  if(!STATE.online){ wgToast("You're offline — adding to the shopping list needs a connection.", "error"); return; }
+  const pat = STATE.patterns.find(p=>p.id===id);
+  if(!pat) return;
+  const sizes = (pat.sizes||[]).filter(x=>x.yardage>0);
+  let size = null, need = pat.yardage;
+  if(sizes.length){
+    const pick = await wgChoose('Which size are you shopping for?', { title: `Yarn for ${pat.name}`,
+      choices: sizes.map(x => ({ label: x.label, detail: `${toDisplayLength(x.yardage).toLocaleString()} ${unitLabel()}`, value: x.label })) });
+    if(!pick) return;
+    size = sizes.find(x=>x.label===pick); need = size.yardage;
+  }
+  if(!need) return;
+  const same = STATE.yarns.filter(y => pat.weightCategory && y.weightCategory === pat.weightCategory);
+  const opts = patternShoppingOptions(need, same);
+  if(!opts.length){ wgToast(`You already have enough ${pat.weightCategory} yarn for this${size ? ` in ${size.label}` : ''}.`); return; }
+  const forWhat = `${pat.name}${size ? ` (${size.label})` : ''}`;
+  const choice = opts.length === 1 ? opts[0] : await wgChoose(`${forWhat} needs ${toDisplayLength(need).toLocaleString()} ${unitLabel()}.`, {
+    title: 'Add to shopping list',
+    choices: opts.map((o,i) => o.kind === 'topup'
+      ? { label: `More of ${yarnDisplayName(o.yarn)}`, detail: `${toDisplayLength(o.yards).toLocaleString()} ${unitLabel()} to top up what you have (match the dye lot if you can)`, value: o, primary: i===0 }
+      : { label: `New ${pat.weightCategory || ''} yarn`.replace(/\s+/g,' '), detail: `${toDisplayLength(o.yards).toLocaleString()} ${unitLabel()}, the full amount`, value: o })
+  });
+  if(!choice) return;
+  const note = `For ${forWhat}`;
+  if(STATE.shoppingList.some(i => !i.done && i.sourceType==='pattern' && i.sourceId===pat.id && i.note===note)){
+    wgToast(`${forWhat} is already on your shopping list.`); return;
+  }
+  const y = choice.kind === 'topup' ? choice.yarn : null;
+  addShoppingItem({
+    colorName: y ? [y.colorway, y.colorwayNumber ? '#'+y.colorwayNumber : ''].filter(Boolean).join(' ') || null : null,
+    hex: y ? y.colorHex : null,
+    weight: pat.weightCategory || null,
+    fiber: y ? y.fiber : null,
+    yardage: choice.yards,
+    quantity: 1,
+    note,
+    sourceType: 'pattern', sourceId: pat.id, sourceName: pat.name
+  });
+  wgToast(`Added ~${toDisplayLength(choice.yards).toLocaleString()} ${unitLabel()} to your shopping list for ${forWhat}.`, 'success');
+  renderTab();
+}
 function renderPatternStashLine(pat){
   const m = patternStashMatches(pat);
   if(!m) return '';
@@ -5942,6 +6123,7 @@ function renderPatternCard(pat){
     <div class="pattern-actions">
       ${STATE.online ? `<button class="btn btn-ghost btn-small" onclick="startProjectFromPattern('${pat.id}')">${ICONS.sparkles} Start project</button>` : ''}
       ${pat.gauge && (pat.gauge.sts||pat.gauge.rows) ? `<button class="btn btn-ghost btn-small" onclick="patternToGauge('${pat.id}')">📐 Check gauge</button>` : ''}
+      ${STATE.online && patternYardageRange(pat) ? `<button class="btn btn-ghost btn-small" onclick="shopForPattern('${pat.id}')" title="Add the yarn this pattern needs to your shopping list">${ICONS.cart} Shop</button>` : ''}
       <span class="pattern-edit">
         <button class="del-btn" onclick="showPatternForm('${pat.id}')" aria-label="Edit pattern">${ICONS.pencil}</button>
         <button class="del-btn" onclick="deletePattern('${pat.id}')" aria-label="Delete pattern">${ICONS.trash}</button>
