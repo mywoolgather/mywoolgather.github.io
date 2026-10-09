@@ -827,10 +827,70 @@ const FIBER_VOCAB = [
   ['Yak', ['yak']], ['Camel', ['camel','kamel']], ['Llama', ['llama','lama']],
   ['Wool', ['wool','laine','wolle','lana','wol','lan']]
 ];
-const ENGLISH_FIBERS = new Set(['merino','alpaca','mohair','kid mohair','cashmere','silk','mulberry silk','linen','flax','cotton','acrylic','nylon','polyester','viscose','rayon','bamboo','yak','camel','llama','wool']);
+const ENGLISH_FIBERS = new Set(['polyamide','merino','alpaca','mohair','kid mohair','cashmere','silk','mulberry silk','linen','flax','cotton','acrylic','nylon','polyester','viscose','rayon','bamboo','yak','camel','llama','wool']);
+/* Words that describe a fiber rather than name it ("Peruvian Highland Wool",
+   "Mercerized Cotton"): kept in the phrase; anything after the last fiber
+   or qualifier word is OCR noise and is cut off. */
+const FIBER_QUALIFIERS = ['superwash','extrafine','extra','fine','peruvian','highland','baby','kid','mulberry','mercerized','mercerised','organic',
+  'recycled','virgin','lambswool','royal','pima','egyptian','merino','shetland','bluefaced','leicester','british','corriedale','targhee','tussah','suri','brushed','tencel','lyocell'];
+/* The label phrase bank — words that turn up on ball bands, in the languages
+   labels commonly use. The reader uses it two ways: as keywords for each
+   field, and as a dictionary to correct OCR slips in those words
+   ("Partip" → "Partie", "Mercenzed" → "Mercerized", "Colqur" → "Colour"). */
+const LABEL_PHRASES = {
+  length: ['length','yardage','yards','metres','meters','meterage','metrage','lauflange','lange','largo','lunghezza','longueur','approx','approximately','ball','skein','hank','per'],
+  weight: ['weight','net','netto','nettogewicht','gewicht','peso','poids','grams','ounces'],
+  colour: ['colour','color','colorway','colourway','shade','farbe','coloris','couleur','nuance','kleur','tono','colore'],
+  lot: ['lot','dye','batch','partie','bain','lote','charge','lotto','farbpartie'],
+  yarnWeight: ['lace','cobweb','fingering','sock','sport','double','knitting','worsted','aran','afghan','bulky','chunky','super','jumbo','medium','light','fine','category','ply','yarn'],
+  other: ['composition','superwash','machine','wash','hand','only','needle','needles','gauge','tension','hook','recommended','tumble','dry','bleach','clean','iron','flat','made']
+};
+let _labelLexicon = null;
+function labelLexicon(vocab){
+  const words = new Set();
+  const add = s => labelNorm(s).split(' ').forEach(w => { if(w.length >= 4 && /^[a-z]+$/.test(w)) words.add(w); });
+  Object.values(LABEL_PHRASES).flat().forEach(add);
+  FIBER_QUALIFIERS.forEach(add);
+  FIBER_VOCAB.forEach(([name, keys]) => { add(name); keys.forEach(add); });
+  (vocab||[]).forEach(v => { add(v.brand); (v.lines||[]).forEach(add); });
+  return words;
+}
+/* Pure: correct OCR slips in label words against the phrase bank (and known
+   brand/yarn names): a word of 4+ letters that isn't a known word, and is
+   one letter off one known word (two for long words), becomes that word.
+   Ambiguous or far-off words are left alone, so colour names survive. */
+function correctLabelText(text, vocab){
+  const lex = labelLexicon(vocab);
+  const byLen = new Map();
+  lex.forEach(w => { if(!byLen.has(w.length)) byLen.set(w.length, []); byLen.get(w.length).push(w); });
+  return String(text||'').replace(/[A-Za-zÀ-ÿ]{4,}/g, tok => {
+    const n = labelNorm(tok).replace(/ /g,'');
+    if(!n || lex.has(n)) return tok;
+    const maxD = n.length >= 7 ? 2 : 1;
+    let best = null, bestD = 99, tie = false;
+    for(let L = n.length - maxD; L <= n.length + maxD; L++){
+      for(const w of byLen.get(L) || []){
+        const d = levenshtein(n, w);
+        if(d < bestD){ best = w; bestD = d; tie = false; } else if(d === bestD && w !== best) tie = true;
+      }
+    }
+    if(!best || bestD > maxD || tie) return tok;
+    return tok[0] === tok[0].toUpperCase() ? best[0].toUpperCase() + best.slice(1) : best;
+  });
+}
+const FOREIGN_FIBER_WORDS = new Set(FIBER_VOCAB.flatMap(([, keys]) => keys).filter(k => !k.includes(' ') && !ENGLISH_FIBERS.has(k)));
 function fiberCanonical(phrase){
   const words = labelNorm(phrase).split(' ');
-  for(const [name, keys] of FIBER_VOCAB) if(keys.some(k => k.includes(' ') ? labelNorm(phrase).includes(k) : words.includes(k))) return { name, english: words.some(w => ENGLISH_FIBERS.has(w)) };
+  // English only if no word is a foreign fiber word ("Lana Merino" isn't English).
+  const english = words.some(w => ENGLISH_FIBERS.has(w)) && !words.some(w => FOREIGN_FIBER_WORDS.has(w));
+  for(const [name, keys] of FIBER_VOCAB) if(keys.some(k => k.includes(' ') ? labelNorm(phrase).includes(k) : words.includes(k))) return { name, english };
+  // A word cut off at the label's edge ("Cot", "Merin"): if every fiber word it
+  // could be the start of is the same fiber, it's that fiber.
+  for(const w of words){
+    if(w.length < 3) continue;
+    const names = new Set(FIBER_VOCAB.filter(([, keys]) => keys.some(k => !k.includes(' ') && k.length > w.length && k.startsWith(w))).map(([n]) => n));
+    if(names.size === 1){ const name = [...names][0]; return { name, english: false }; }
+  }
   // One OCR slip in a longer fiber word ("Woo!", "Acrylc", "Cottom").
   for(const [name, keys] of FIBER_VOCAB) if(keys.some(k => k.length >= 4 && words.some(w => w.length >= 3 && Math.abs(w.length - k.length) <= 1 && levenshtein(w, k) <= 1))) return { name, english: false };
   return null;
@@ -841,25 +901,56 @@ function fiberCanonical(phrase){
 function parseLabelFiber(text){
   const out = [];
   let total = 0;
-  const re = /(\d{1,3})\s*%\s*([^%\d\/|,;()\n]{2,40})/g;
-  let m;
-  while((m = re.exec(text))){
-    const pct = Number(m[1]);
-    if(pct > 100) continue;
-    const phrase = m[2].replace(/\s+/g,' ').trim();
-    let c = fiberCanonical(phrase);
+  // Keep the phrase up to its last fiber/qualifier word: "Mercerized Cotton Ee EL" → "Mercerized Cotton".
+  const tidy = phrase => {
+    const words = phrase.replace(/^[^A-Za-zÀ-ÿ]+/, '').split(/\s+/).filter(Boolean);
+    let last = -1;
+    words.forEach((w, i) => { const n = labelNorm(w); if(FIBER_QUALIFIERS.includes(n) || FIBER_VOCAB.some(([, keys]) => keys.includes(n))) last = i; });
+    return last < 0 ? words.join(' ') : words.slice(0, last + 1).join(' ');
+  };
+  const take = (pct, rawPhrase, after) => {
+    if(pct > 100) return;
+    const phrase = tidy(rawPhrase.replace(/\s+/g,' ').trim());
+    const c = fiberCanonical(phrase);
+    if(!c) return;
+    let label = c.english ? phrase : null;
     // "100% Baumwolle / Cotton": the English word may follow the slash.
-    let label = c && c.english ? phrase : null;
-    if(c && !c.english){
-      const after = text.slice(m.index + m[0].length, m.index + m[0].length + 30).match(/^\s*\/\s*([A-Za-z][A-Za-z ]{2,25})/);
-      const alt = after && fiberCanonical(after[1]);
-      if(alt && alt.english && alt.name === c.name) label = after[1].trim();
+    if(!c.english && after){
+      const alt = after.match(/^\s*\/\s*([A-Za-z][A-Za-z ]{2,25})/);
+      const ac = alt && fiberCanonical(tidy(alt[1]));
+      if(ac && ac.english && ac.name === c.name) label = tidy(alt[1]);
     }
-    if(!c) continue;
-    if(out.some(f => f.name === c.name && (f.pct === pct || !pct))) continue;   // a translation
-    if(total + pct > 100) continue;
-    out.push({ pct, name: c.name, label: label || c.name });
+    const dup = out.find(f => f.name === c.name && (f.pct === pct || !pct || !f.pct));
+    if(dup){
+      // The same fiber again, in another language: keep the English wording.
+      if(label && !dup.english){ dup.label = label; dup.english = true; }
+      if(!dup.pct && pct){ dup.pct = pct; total += pct; }
+      return;
+    }
+    // A misread percentage that overshoots 100 ("60% Silk 46% Merino"): the rest.
+    if(total + pct > 100){ if(total < 100 && total + pct - 100 <= 10) pct = 100 - total; else return; }
+    out.push({ pct, name: c.name, label: label || c.name, english: !!label });
     total += pct;
+  };
+  for(const line of String(text).split('\n')){
+    const before = out.length;
+    let m;
+    // "Mulberry Silk 60%, Merino Wool 35%": the line names a fiber before its first percentage.
+    // Name-first when the line ends on a percentage ("Wool 85%, Acrylic 15%"), or the
+    // words right before the first one are a fiber and the words after aren't.
+    const firstPct = line.search(/\d{1,3}\s*%/);
+    const pm = firstPct >= 0 ? line.slice(firstPct).match(/^\d{1,3}\s*%\W*/) : null;
+    const lastWords = s => s.trim().split(/\s+/).slice(-2).join(' ');
+    const nameFirst = firstPct > 0 && (/\d\s*%[^A-Za-zÀ-ÿ\d]*$/.test(line.trim())
+      || (!!fiberCanonical(lastWords(line.slice(0, firstPct))) && !fiberCanonical(line.slice(firstPct + pm[0].length).split(/\s+/).slice(0, 2).join(' '))));
+    if(!nameFirst){
+      const re = /(\d{1,3})\s*%\s*([^%\d\/|,;()]{2,40})/g;
+      while((m = re.exec(line))) take(Number(m[1]), m[2], line.slice(m.index + m[0].length, m.index + m[0].length + 30));
+    }
+    if(out.length === before){
+      const re2 = /([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ ]{1,40}?)\s*(\d{1,3})\s*%/g;
+      while((m = re2.exec(line))) take(Number(m[2]), m[1].replace(/^.*?:\s*/,''), '');
+    }
   }
   // A blend with one percentage lost to OCR ("0% Acrylic / 20% Wool"): it's the rest.
   const lost = out.filter(f => !f.pct);
@@ -871,8 +962,15 @@ function parseLabelFiber(text){
 }
 /* Pure: weight category from a label. The CYC symbol ("(4) MEDIUM") wins;
    then names, longest first so "super bulky" isn't read as "bulky"; then ply. */
-function parseLabelWeight(text){
+function parseLabelWeight(text, ignore){
+  // The yarn's own name ("Tweed DK") isn't the label stating its weight.
+  (ignore||[]).filter(Boolean).forEach(n => { text = text.replace(new RegExp(n.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'), 'gi'), ' '); });
   const t = ' ' + labelNorm(text) + ' ';
+  const stated = text.match(/(?:yarn\s*weight|weight\s*category)\s*[:\-]?\s*([A-Za-z][A-Za-z ]{1,20})|\b([A-Za-z]+(?:\s+[A-Za-z]+)?)\s+weight\b/i);
+  if(stated){
+    const w = parseLabelWeight(stated[1] || stated[2]);
+    if(w) return w;
+  }
   const cyc = text.match(/\(?\b([0-7])\)?\s*[-–]?\s*(lace|super\s*fine|fine|light|medium|bulky|super\s*bulky|jumbo)\b/i);
   if(cyc) return ['Lace','Fingering','Sport','DK','Worsted','Bulky','Super Bulky','Super Bulky'][Number(cyc[1])];
   const names = [['Super Bulky',['super bulky','super chunky','jumbo','roving']],['DK',['light worsted','double knitting','double knit','dk']],
@@ -896,10 +994,13 @@ function fixOcrDigits(text){
    tesseract.js (readYarnLabel); this is the "make sense of it" step.
 ================================================================= */
 function parseYarnLabel(rawText, vocab){
-  const text = fixOcrDigits(String(rawText || '').replace(/[“”„]/g,'"').replace(/[‘’]/g,"'").replace(/[–—]/g,'-'));
+  const V = vocab || labelVocabulary();
+  let text = String(rawText || '').replace(/[“”„]/g,'"').replace(/[‘’]/g,"'").replace(/[–—]/g,'-');
+  text = text.replace(/(\d)\s*0z\b/gi, '$1 oz')                 // "3.5 0z" → oz
+             .replace(/\bca(?=[lI|\d])/g, 'ca ');                 // "cal00m" → "ca l00m"
+  text = fixOcrDigits(correctLabelText(text, V));
   const norm = labelNorm(text);
   const out = { brand:null, line:null, fiber:null, weightCategory:null, skeinYardage:null, skeinWeightGrams:null, colorway:null, dyeLot:null };
-  const V = vocab || labelVocabulary();
 
   // --- Brand and line: best fuzzy match; a line confirms its brand ---
   let best = null;
@@ -915,36 +1016,50 @@ function parseYarnLabel(rawText, vocab){
   }
   if(best){ out.brand = best.brand; out.line = best.line; }
 
-  out.weightCategory = parseLabelWeight(text);
+  // The label's own statement first; the yarn's name ("Tweed DK") only as a fallback.
+  out.weightCategory = parseLabelWeight(text, [out.line]) || (out.line ? parseLabelWeight(out.line) : null);
   out.fiber = parseLabelFiber(text);
 
   // --- Length: yards if given, else metres → yards. Plausible skeins only. ---
   const num = s => Number(String(s).replace(/,(?=\d{3}\b)/g,'').replace(',', '.'));
   const yd = [...text.matchAll(/(\d[\d,.]*)\s*(?:yds?|yards?|yardage)\b/gi)].map(m => num(m[1])).find(n => n >= 10 && n <= 3000);
-  const mt = [...text.matchAll(/(\d[\d,.]*)\s*(?:m|meters?|metres?|mtrs?)\b/gi)].map(m => num(m[1])).find(n => n >= 10 && n <= 3000);
+  const mt = [...text.matchAll(/(\d[\d,.]*)\s*(?:m|meters?|metres?|mtrs?|mts?)\b/gi)].map(m => num(m[1])).find(n => n >= 10 && n <= 3000);
+  // The unit can be unreadable ("Largo 800 mt5"): a number right after a length
+  // keyword is metres (yards after "yardage"/"yards").
+  const kw = re => { const m = text.match(re); return m ? num(m[1]) : null; };
+  const kwYd = kw(/\b(?:yardage|yards)\b\s*[:=]?\s*(\d[\d,.]*)/i);
+  const kwM = kw(/\b(?:length|lauflange|lauflänge|lange|länge|largo|lunghezza|longueur|meterage|metrage)\b\s*[:=/]?\s*(?:[a-z]+\s*[:=]?\s*)?(\d[\d,.]*)/i);
   if(yd) out.skeinYardage = Math.round(yd);
   else if(mt) out.skeinYardage = Math.round(mt * YD_PER_M);
+  else if(kwYd && kwYd >= 10 && kwYd <= 3000) out.skeinYardage = Math.round(kwYd);
+  else if(kwM && kwM >= 10 && kwM <= 3000) out.skeinYardage = Math.round(kwM * YD_PER_M);
 
   // --- Skein weight: grams, else ounces ---
-  const g = [...text.matchAll(/(\d[\d,.]*)\s*(?:g|gr|grs|grams?|grammes?)\b/gi)].map(m => num(m[1])).find(n => n >= 5 && n <= 1000);
+  // Common skein weights, for undoing "g" misread as "9" ("509g", "100 9").
+  const SKEIN_G = [10, 20, 25, 40, 50, 100, 150, 200, 250];
+  let g = [...text.matchAll(/(\d[\d,.]*)\s*(?:g|gr|grs|grams?|grammes?)(?:\b|(?=\d))/gi)].map(m => num(m[1])).map(n => (n > 100 && String(n).endsWith('9') && SKEIN_G.includes(Math.floor(n / 10))) ? Math.floor(n / 10) : n).find(n => n >= 5 && n <= 1000);
+  if(!g){ const m9 = text.match(/\b(\d{2,3})\s+9\b(?=\s*(?:[A-Za-z\/=(]|$))/m); if(m9 && SKEIN_G.includes(Number(m9[1]))) g = Number(m9[1]); }
   const oz = [...text.matchAll(/(\d+(?:[.,]\d+)?)\s*(?:oz|ounces?)\b/gi)].map(m => num(m[1])).find(n => n > 0 && n <= 35);
+  // Likewise "Peso 25 ar" / "Net wt 100": a weight keyword then a number.
+  const kwG = (() => { const m = text.match(/\b(?:peso|net\s*wt|netto|nettogewicht|gewicht|poids|weight)\b\.?\s*[:=]?\s*(\d{1,4})\b/i); return m ? Number(m[1]) : null; })();
   if(g) out.skeinWeightGrams = Math.round(g);
   else if(oz) out.skeinWeightGrams = Math.round(oz * 28.35);
+  else if(kwG && kwG >= 5 && kwG <= 1000) out.skeinWeightGrams = kwG;
 
   // --- Dye lot: the first lot-like word followed by a code with a digit ---
   // (Keyword and value are matched separately so "…dye lot to dye lot / Lot: 6342"
   // can't use up the second "Lot" as a value.)
   for(const k of text.matchAll(/\b(?:dye\s*lot|lot|batch|partie|bain|lote|charge|farbpartie|lotto)\b/gi)){
-    const m = text.slice(k.index + k[0].length).match(/^\s*(?:no\.?|nr\.?|#)?\s*[:;.#]?\s*([A-Z0-9][A-Z0-9-]{1,11})\b/i);
+    const m = text.slice(k.index + k[0].length).match(/^\s*(?:no\.?|nr\.?|n[°º*]|#)?\s*[:;.#]?\s*([A-Z0-9][A-Z0-9-]{1,11})\b/i);
     if(m && /\d/.test(m[1])){ out.dyeLot = m[1]; break; }
   }
 
   // --- Colour: needs a separator or a number, so "Colours may vary" isn't one ---
   for(const k of text.matchAll(/\b(?:colou?rway|colou?r|col|shade|farbe|coloris|couleur|nuance|tono|colore|kleur)\b/gi)){
-    const m = text.slice(k.index + k[0].length).match(/^\.?(?:\s*\/\s*[A-Za-z]+\.?)?\s*(?:(?:no\.?|nr\.?|n°|#)\s*|:\s*|(?=\d))([A-Za-z0-9][A-Za-z0-9 '&-]{0,28})/i);
+    const m = text.slice(k.index + k[0].length).match(/^\.?(?:\s*\/\s*[A-Za-z]+\.?)?\s*(?:(?:no|nr|n°|#)\.?\s*:?\s*|:\s*|(?=\d))([A-Za-z0-9][A-Za-z0-9 '&-]{0,28})/i);
     if(!m) continue;
-    let v = m[1].replace(/\s+(?:dye\s*lot|lot|partie|batch)\b.*$/i,'').trim();
-    if(/^(?:may|can|might|will|varies|vary|fast|card)\b/i.test(v)) continue;
+    if(/^(?:may|can|might|will|varies|vary|fast|card)\b/i.test(m[1])) continue;
+    const v = colourValue(m[1]);
     if(v){ out.colorway = v; break; }
   }
 
@@ -952,6 +1067,25 @@ function parseYarnLabel(rawText, vocab){
   return out;
 }
 
+/* Pure: the colour itself out of what follows "Colour": an optional number
+   then up to three capitalised words ("0336 Warm Brown"), stopping at the
+   next label keyword or OCR crumbs ("Warm Brown Sit at oa", "001 ate"). */
+function colourValue(raw){
+  const stop = new Set([...LABEL_PHRASES.length, ...LABEL_PHRASES.weight, ...LABEL_PHRASES.lot, ...LABEL_PHRASES.colour, ...LABEL_PHRASES.yarnWeight, ...LABEL_PHRASES.other, 'composition','dry','wash']);
+  const toks = String(raw).trim().split(/\s+/);
+  const out = [];
+  let i = 0;
+  if(/^\d[\dA-Z-]*$/i.test(toks[0]) && /\d/.test(toks[0])) out.push(toks[i++]);
+  let words = 0;
+  for(; i < toks.length && words < 3; i++){
+    const t = toks[i], n = labelNorm(t);
+    if(stop.has(n) || !/^[A-ZÀ-Ý][a-zà-ÿ'&-]{2,}$|^[A-ZÀ-Ý]{3,}$/.test(t)) break;
+    // A short capitalised crumb after a name ("Brown Sit") is likely noise.
+    if(words && t.length <= 3 && !/^[A-Z]{3}$/.test(t)) break;
+    out.push(t); words++;
+  }
+  return out.join(' ') || null;
+}
 /* Pure: contrast settings for a label photo from its grey levels (0–255):
    stretch the 2nd–98th percentile to full range, and invert light-on-dark
    labels (OCR reads dark text on light best). */

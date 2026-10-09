@@ -449,6 +449,27 @@
     ok('flatten: an even gradient becomes even', Math.abs(flat[10] - flat[30]) <= 6);
   }catch(e){ ok('label block threw: '+e.message, false); }
 
+  // --- Label scanning: phrase bank and OCR corrections ---
+  try{
+    const vocab = [{ brand:'Moss & Marrow', lines:['Tweed DK'] }, { brand:'Cascade Yarns', lines:['220'] }];
+    ok('spell-check: label words corrected, colour names left alone', correctLabelText('Partip 1083 Mercenzed Cotton Colqur Rose Sage', vocab)==='Partie 1083 Mercerized Cotton Colour Rose Sage');
+    ok('spell-check: long words may be two letters off', correctLabelText('Double Knuting', vocab)==='Double Knitting');
+    ok('fiber: percentage after the name', parseLabelFiber('Mulberry Silk 60%, Merino Wool 35%, Mohair 5%')==='60% Mulberry Silk, 35% Merino Wool, 5% Mohair' && parseLabelFiber('Acrylic 50%. Peruvian Highland Wool 50%')==='50% Acrylic, 50% Peruvian Highland Wool');
+    ok('fiber: a yarn name before the percentage is not a fiber', parseLabelFiber('Meadow Wool of the Hills 100% Peruvian Highland Wool 50 g')==='100% Peruvian Highland Wool');
+    ok('fiber: translation first, English wording wins', parseLabelFiber('100% Lana Merino\n100% Extrafine Merino')==='100% Extrafine Merino');
+    ok('fiber: OCR noise after the fiber is cut', parseLabelFiber('70% Linen, 30% Mercerized Cotton Ee EL')==='70% Linen, 30% Mercerized Cotton');
+    ok('fiber: a word cut off at the edge, and an overshooting misread', parseLabelFiber('80% Wool 20% Cot')==='80% Wool, 20% Cotton' && parseLabelFiber('60% Mulberry Silk 46% Merino Wool')==='60% Mulberry Silk, 40% Merino Wool');
+    const p = parseYarnLabel('Moss & Marrow\nTweed DK\nSport weight\n1 ball'+"'"+' = 200g8/7.10z\nPeso 25 ar - Largo 300 mt5\nShade 059 Warm Brown Sit\nBain n° 49B1', vocab);
+    ok('weight: the label beats the yarn name ("Tweed DK" but "Sport weight")', p.weightCategory==='Sport');
+    ok('weight: the yarn name is the fallback', parseYarnLabel('Moss & Marrow\nTweed DK', vocab).weightCategory==='DK');
+    ok('grams: "200g8" is 200 g', p.skeinWeightGrams===200);
+    ok('length: a number after "Largo" is metres even with the unit misread', p.skeinYardage===Math.round(300*YD_PER_M));
+    ok('grams: "Peso 25 ar" and "100 9" read via their keyword / shape', parseYarnLabel('Peso 25 ar', vocab).skeinWeightGrams===25 && parseYarnLabel('Net wt. 100 9 Length 192 m', vocab).skeinWeightGrams===100);
+    ok('colour: crumbs after the name dropped; "Bain n°" lot', p.colorway==='059 Warm Brown' && p.dyeLot==='49B1');
+    ok('colour value: stops at the next label word', colourValue('5423 Moss Garden Category 3')==='5423 Moss Garden' && colourValue('80 Dry clean')==='80' && colourValue('Rose 3')==='Rose');
+    ok('units: "3.5 0z" and "ca l00 m"', parseYarnLabel('3.5 0z', vocab).skeinWeightGrams===99 && parseYarnLabel('50 g = cal00m', vocab).skeinYardage===Math.round(100*YD_PER_M));
+  }catch(e){ ok('label phrase block threw: '+e.message, false); }
+
   // --- closenessPercent monotonic ---
   try{
     ok('closeness identical = 100', closenessPercent(0) === 100);
