@@ -140,8 +140,7 @@
   // Tip-jar links for the demo (same as the live app — safe to show on a
   // portfolio). Fill in your real funding URLs.
   window.WG_TIP_LINKS = [
-    // { label: 'Buy me a coffee ☕', url: 'https://buymeacoffee.com/yourname' },
-    // { label: 'Tip on Ko-fi', url: 'https://ko-fi.com/yourname' },
+    { label: 'Buy me a tea ☕', url: 'https://ko-fi.com/cozyplantygirl' },
   ];
 
   window.dispatchEvent(new Event('firebase-ready'));
