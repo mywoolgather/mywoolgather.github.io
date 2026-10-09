@@ -1454,7 +1454,10 @@ function renderOverview(){
     ${statTile('In progress', s.wipCount)}
     ${statTile('Oldest WIP', s.oldestWipDays!=null ? s.oldestWipDays+'d' : '—')}
     ${statTile('Avg. time to finish', s.avgFinishDays!=null ? s.avgFinishDays+'d' : '—')}
+    ${STATE.patterns.length ? statTile('Patterns queued', STATE.patterns.filter(p=>p.status==='queued').length, `of ${STATE.patterns.length} saved`) : ''}
+    ${STATE.shoppingList.some(i=>!i.done) ? statTile('To buy', STATE.shoppingList.filter(i=>!i.done).length, 'on your shopping list') : ''}
   </div>
+  ${renderUpNext()}
   <div class="chart-grid">
     <div class="card chart-card">
       <p class="chart-title">Yarn owned by fiber (${unitLabel()})</p>
@@ -1472,6 +1475,38 @@ function renderOverview(){
     </div>`;
   }
   return html;
+}
+/* Pure: queued patterns, each with the free stash yarn that suits it best —
+   one with enough for at least the smallest size, else the one with most of
+   that weight. Patterns already being made (a Planned/WIP project) are left out. */
+function upNextPatterns(patterns, yarns, projects){
+  const active = new Set((projects||[]).filter(p => p.patternId && (p.status==='Planned' || p.status==='WIP')).map(p => p.patternId));
+  return (patterns||[]).filter(p => p.status==='queued' && !active.has(p.id)).map(p => {
+    const r = patternYardageRange(p);
+    const pool = (yarns||[]).filter(y => p.weightCategory && y.weightCategory===p.weightCategory && yarnStatus(y)!=='allocated' && (Number(y.yardageRemaining)||0) > 0)
+      .sort((a,b) => (Number(b.yardageRemaining)||0) - (Number(a.yardageRemaining)||0));
+    const best = pool[0] || null;
+    const have = best ? Number(best.yardageRemaining)||0 : 0;
+    const ready = !!(r && best && have >= r.min);
+    return { pattern: p, yarn: best, ready, covers: ready && r.count ? patternSizesCovered(p.sizes, have) : null, short: r && !ready ? Math.ceil(r.min - have) : null };
+  }).sort((a,b) => (b.ready - a.ready) || a.pattern.name.localeCompare(b.pattern.name));
+}
+function renderUpNext(){
+  const list = upNextPatterns(STATE.patterns, STATE.yarns, STATE.projects);
+  if(!list.length) return '';
+  return `<div class="card up-next">
+    <p class="chart-title">Up next from your queue</p>
+    ${list.slice(0,5).map(m => `<div class="up-next-row">
+      <button type="button" class="pattern-inline-link" onclick="openPatternInLibrary('${m.pattern.id}')">${ICONS.book} ${esc(m.pattern.name)}</button>
+      <span class="note">${m.ready
+        ? `<span class="ok-text">ready</span> — ${esc(yarnDisplayName(m.yarn))}${m.covers ? ` (${esc(m.covers)})` : ''}`
+        : m.short != null ? (m.yarn ? `${toDisplayLength(m.short).toLocaleString()} ${unitLabel()} short` : `no free ${esc(m.pattern.weightCategory||'')} yarn`) : 'add yardage to check your stash'}</span>
+      ${STATE.online ? (m.ready
+        ? `<button class="btn btn-ghost btn-small" onclick="startProjectFromPattern('${m.pattern.id}')">${ICONS.sparkles} Start</button>`
+        : m.short != null ? `<button class="btn btn-ghost btn-small" onclick="shopForPattern('${m.pattern.id}')">${ICONS.cart} Shop</button>` : '') : ''}
+    </div>`).join('')}
+    ${list.length > 5 ? `<p class="note" style="margin:6px 0 0;">…and ${list.length-5} more in your queue</p>` : ''}
+  </div>`;
 }
 function statTile(label,value,sub){
   return `<div class="card stat-tile"><p class="label">${esc(label)}</p><p class="value">${esc(value)}</p>${sub?`<p class="sub">${esc(sub)}</p>`:''}</div>`;
@@ -2101,7 +2136,13 @@ function handleSaveYarn(e){
     const yarn = { id: uid(), ...fields, scraps, status:'available', allocatedTo:null, dateAdded: todayStr(), updatedAt: new Date().toISOString() };
     yarn.yardageRemaining = yarnTotalYardage(yarn) + newScrapYd;
     STATE.yarns.push(yarn);
+    // Logged from a bought shopping item: it comes off the list.
+    if(pendingShoppingToStashId){
+      STATE.shoppingList = STATE.shoppingList.filter(i=>i.id!==pendingShoppingToStashId);
+      wgToast('Added to your stash and taken off your shopping list.', 'success');
+    }
   }
+  pendingShoppingToStashId = null;
   persist();
   STATE.showYarnForm = false;
   STATE.editingYarnId = null;
@@ -2110,8 +2151,19 @@ function handleSaveYarn(e){
 }
 
 async function deleteYarn(id){
-  if(!(await wgConfirm('Remove this yarn from your stash? This cannot be undone.', {title:'Remove yarn', okLabel:'Remove', danger:true}))) return;
+  const inProjects = STATE.projects.filter(p=>(p.yarnIds||[]).includes(id));
+  const inPalettes = STATE.paletteSavedPalettes.filter(pl=>(pl.slots||[]).some(s=>s.yarnId===id) || pl.baseYarnId===id);
+  const where = [inProjects.length && `${inProjects.length} project${inProjects.length===1?'':'s'} (${inProjects.slice(0,3).map(p=>p.name).join(', ')}${inProjects.length>3?'…':''})`,
+    inPalettes.length && `${inPalettes.length} palette${inPalettes.length===1?'':'s'}`].filter(Boolean).join(' and ');
+  const msg = where
+    ? `This yarn is linked to ${where}. They'll keep their history, but the link to this yarn is removed. This cannot be undone.`
+    : 'Remove this yarn from your stash? This cannot be undone.';
+  if(!(await wgConfirm(msg, {title:'Remove yarn', okLabel:'Remove', danger:true}))) return;
   STATE.yarns = STATE.yarns.filter(y=>y.id!==id);
+  // Projects stop pointing at it (usage history stays for the stats).
+  STATE.projects = STATE.projects.map(p => (p.yarnIds||[]).includes(id) || (p.yarnRequired||[]).some(u=>u.yarnId===id)
+    ? { ...p, yarnIds: (p.yarnIds||[]).filter(x=>x!==id), yarnRequired: (p.yarnRequired||[]).filter(u=>u.yarnId!==id) } : p);
+  STATE.shoppingList = STATE.shoppingList.map(i => i.yarnId===id ? { ...i, yarnId:null } : i);
   persist();
   renderTab();
 }
@@ -2345,7 +2397,9 @@ function renderYarnCard(y){
   if(usedInProjects.length) usageBits.push(`${usedInProjects.length} project${usedInProjects.length===1?'':'s'}`);
   if(usedInPalettes.length) usageBits.push(`${usedInPalettes.length} palette${usedInPalettes.length===1?'':'s'}`);
   const usageLine = usageBits.length
-    ? `<p class="note" style="margin-top:8px; font-size:0.7rem;" title="${esc([...usedInProjects.map(p=>p.name),...usedInPalettes.map(p=>p.name)].join(', '))}">Used in ${usageBits.join(' · ')}</p>`
+    ? `<p class="note" style="margin-top:8px; font-size:0.7rem;" title="${esc([...usedInProjects.map(p=>p.name),...usedInPalettes.map(p=>p.name)].join(', '))}">Used in ${usedInProjects.length
+        ? usedInProjects.slice(0,3).map(p=>`<button type="button" class="pattern-inline-link" onclick="openProjectInList('${p.id}')">${esc(p.name)}</button>`).join(', ') + (usedInProjects.length>3 ? ` +${usedInProjects.length-3}` : '')
+        : ''}${usedInProjects.length && usedInPalettes.length ? ' · ' : ''}${usedInPalettes.length ? `${usedInPalettes.length} palette${usedInPalettes.length===1?'':'s'}` : ''}</p>`
     : '';
   return `<div class="card yarn-card">
     <div class="yarn-hole"></div>
@@ -2403,6 +2457,7 @@ function patternsForYarn(yarn, patterns){
     .sort((a,b) => (rank[a.pattern.status||'saved'] - rank[b.pattern.status||'saved']) || a.pattern.name.localeCompare(b.pattern.name));
 }
 function renderYarnPatternsLine(y){
+  if(yarnStatus(y)==='allocated') return '';   // already promised to a project
   const list = patternsForYarn(y, STATE.patterns);
   if(!list.length) return '';
   return `<details class="note yarn-patterns"><summary>📖 Enough for ${list.length} pattern${list.length===1?'':'s'}</summary>
@@ -2473,6 +2528,7 @@ function renderProjects(){
    saved. Editing an *existing* project does not revert on cancel — yardage
    already recorded as used represents real-world consumption, not a draft. */
 function cleanupOpenForms(){
+  pendingShoppingToStashId = null;
   if(STATE.showProjectForm && STATE.editingProjectId && !STATE.projects.find(p=>p.id===STATE.editingProjectId)){
     let changed = false;
     STATE.yarns = STATE.yarns.map(y=>{
@@ -3041,10 +3097,11 @@ function handleSaveProject(e){
     links: pendingProjectLinks.map(l=>({ id:l.id, url:l.url, type:l.type, title:l.title, thumbnail:l.thumbnail }))
   };
   if(existing){
-    STATE.projects = STATE.projects.map(p => p.id===STATE.editingProjectId ? { ...p, ...fields, updatedAt: new Date().toISOString() } : p);
+    STATE.projects = STATE.projects.map(p => p.id===STATE.editingProjectId ? withStatusDates({ ...p, ...fields, updatedAt: new Date().toISOString() }) : p);
   } else {
-    STATE.projects.push({ id: STATE.editingProjectId, ...fields, createdAt: todayStr(), updatedAt: new Date().toISOString() });
+    STATE.projects.push(withStatusDates({ id: STATE.editingProjectId, ...fields, createdAt: todayStr(), updatedAt: new Date().toISOString() }));
   }
+  syncPatternStatusFromProject(STATE.projects.find(p=>p.id===STATE.editingProjectId));
   persist();
   STATE.showProjectForm = false;
   STATE.editingProjectId = null;
@@ -3066,15 +3123,53 @@ async function deleteProject(id){
   renderTab();
 }
 function updateProjectStatus(id, status){
-  STATE.projects = STATE.projects.map(p => p.id===id ? {...p, status} : p);
+  STATE.projects = STATE.projects.map(p => p.id===id ? withStatusDates({ ...p, status }) : p);
+  syncPatternStatusFromProject(STATE.projects.find(p=>p.id===id));
   persist();
   renderTab();
+}
+/* Finishing a project records today as its finish date if none is set, so
+   Showcase dates and "average time to finish" stay right. */
+function withStatusDates(p){
+  if(p.status === 'Finished' && !p.finishDate) return { ...p, finishDate: todayStr() };
+  return p;
+}
+/* Pure: what a pattern's status becomes when one of its projects changes —
+   only ever forward (saved → queued → made), never back. Frogged changes nothing. */
+function patternStatusForProject(patternStatus, projectStatus){
+  const order = { saved:0, queued:1, made:2 };
+  const want = projectStatus === 'Finished' ? 'made' : (projectStatus === 'Planned' || projectStatus === 'WIP') ? 'queued' : null;
+  const cur = patternStatus || 'saved';
+  return want && order[want] > order[cur] ? want : cur;
+}
+function syncPatternStatusFromProject(proj){
+  if(!proj || !proj.patternId) return;
+  const pat = STATE.patterns.find(p=>p.id===proj.patternId);
+  if(!pat) return;
+  const next = patternStatusForProject(pat.status, proj.status);
+  if(next === (pat.status||'saved')) return;
+  STATE.patterns = STATE.patterns.map(p => p.id===pat.id ? { ...p, status: next, updatedAt: new Date().toISOString() } : p);
+  wgToast(`${pat.name} is now "${patternStatusLabel(next)}" in your pattern library.`);
 }
 /* Duplicate a project — copies the PLAN (name, pattern, needle, gauge, linked
    yarns, per-yarn "need", counter setup) but resets PROGRESS: status back to
    Planned, no dates, no photos, and usage cleared (so it doesn't double-deduct
    stock or double-reference the original's uploaded photos). For remaking the
    same thing without re-entering everything. */
+/* Jump to a project's row on the Projects tab (from a yarn, pattern or
+   shopping item) and highlight it briefly. */
+function openProjectInList(id){
+  if(!STATE.projects.some(p=>p.id===id)) return;
+  STATE.projFilterStatus = 'All statuses';
+  switchTab('projects');
+  requestAnimationFrame(() => {
+    const row = document.getElementById('proj-' + id);
+    if(!row) return;
+    row.scrollIntoView({ behavior:'smooth', block:'center' });
+    row.classList.add('flash');
+    setTimeout(() => row.classList.remove('flash'), 1800);
+  });
+}
 function duplicateProject(id){
   const src = STATE.projects.find(p=>p.id===id);
   if(!src) return;
@@ -3120,7 +3215,7 @@ function renderProjectRow(p){
   const counterPanel = (counters.length && expanded)
     ? `<div class="counter-panel">${counters.map(c=>renderCounter(p.id, c)).join('')}</div>`
     : '';
-  return `<div class="project-row">
+  return `<div class="project-row" id="proj-${p.id}">
     <span class="status-dot" style="background:${STATUS_COLORS[p.status]}"></span>
     <div class="grow">
       <p class="project-name">${esc(p.name)}${p.patternName ? ` <span class="pattern">— ${p.patternId && STATE.patterns.some(pt=>pt.id===p.patternId) ? `<button type="button" class="pattern-inline-link" onclick="openPatternInLibrary('${p.patternId}')" title="Open in pattern library">${ICONS.book} ${esc(p.patternName)}</button>` : esc(p.patternName)}${p.patternSize ? ` · size ${esc(p.patternSize)}` : ''}</span>` : ''}</p>
@@ -3128,7 +3223,7 @@ function renderProjectRow(p){
         ${usedYarns.map(y=>`<span class="dot" style="background:${y.colorHex}" title="${esc(y.name)}"></span>`).join('')}
         ${garmentBadge ? `<span class="note">${esc(garmentBadge)}</span>` : ''}
         ${p.needleSize ? `<span class="note">🪡 ${esc(p.needleSize)}</span>` : ''}
-        ${p.gauge && (p.gauge.sts||p.gauge.rows) ? `<span class="note">📐 ${p.gauge.sts||'?'}×${p.gauge.rows||'?'}/${p.gauge.unit==='cm'?'10cm':'4in'}${p.gauge.stitchType?` ${esc(p.gauge.stitchType)}${p.gauge.terms==='uk'?' (UK)':''}`:''}</span>` : ''}
+        ${p.gauge && (p.gauge.sts||p.gauge.rows) ? `<span class="note">📐 ${p.gauge.sts||'?'}×${p.gauge.rows||'?'}/${p.gauge.unit==='cm'?'10cm':'4in'}${p.gauge.stitchType?` ${esc(p.gauge.stitchType)}${p.gauge.terms==='uk'?' (UK)':''}`:''}${renderGaugeVsPattern(p)}</span>` : ''}
         ${attachedPalette ? `<span class="note">${ICONS.palette} ${esc(attachedPalette.name)}</span>` : ''}
         ${gapBadge}
         ${counters.length ? `<span class="note">${counters.length} counter${counters.length===1?'':'s'}</span>` : ''}
@@ -3142,11 +3237,30 @@ function renderProjectRow(p){
       ${STATUSES.map(s=>`<option ${s===p.status?'selected':''}>${s}</option>`).join('')}
     </select>
     ${counterToggle}
-    ${gapInfo && gapInfo.gap>0 ? `<button class="del-btn" onclick="shopProjectGap('${p.id}')" aria-label="Add gap to shopping list" title="Add the ${Math.round(gapInfo.gap)} yd gap to your shopping list">${ICONS.cart}</button>` : ''}
+    ${gapInfo && gapInfo.gap>0 ? `<button class="del-btn" onclick="shopProjectGap('${p.id}')" aria-label="Add gap to shopping list" title="Add the ${toDisplayLength(gapInfo.gap)} ${unitLabel()} gap to your shopping list">${ICONS.cart}</button>` : ''}
     <button class="del-btn" onclick="duplicateProject('${p.id}')" aria-label="Duplicate project" title="Make a copy of this project">⧉</button>
     <button class="del-btn" onclick="showProjectForm('${p.id}')" aria-label="Edit project">${ICONS.pencil}</button>
     <button class="del-btn" onclick="deleteProject('${p.id}')" aria-label="Delete project">${ICONS.trash}</button>
   </div>`;
+}
+/* Pure: compare a project's achieved gauge with its pattern's (same square,
+   converted between 4 in and 10 cm). Within 5% counts as on gauge.
+   Returns { sts, rows } each 'on' | 'tight' | 'loose' | null. */
+function compareGauge(mine, target){
+  if(!mine || !target) return null;
+  const per10cm = (g, v) => v == null || v === '' ? null : Number(v) * (g.unit === 'cm' ? 1 : 10 / 10.16);
+  const cmp = (a, b) => (a == null || b == null || !b) ? null : Math.abs(a - b) / b <= 0.05 ? 'on' : (a > b ? 'tight' : 'loose');
+  return { sts: cmp(per10cm(mine, mine.sts), per10cm(target, target.sts)), rows: cmp(per10cm(mine, mine.rows), per10cm(target, target.rows)) };
+}
+function renderGaugeVsPattern(p){
+  const pat = p.patternId && STATE.patterns.find(pt=>pt.id===p.patternId);
+  if(!pat || !pat.gauge || !(pat.gauge.sts || pat.gauge.rows)) return '';
+  const c = compareGauge(p.gauge, pat.gauge);
+  if(!c || (!c.sts && !c.rows)) return '';
+  const word = { on:'on gauge', tight:'tighter', loose:'looser' };
+  const parts = [c.sts && `sts ${word[c.sts]}`, c.rows && `rows ${word[c.rows]}`].filter(Boolean);
+  const off = c.sts && c.sts !== 'on' || c.rows && c.rows !== 'on';
+  return ` <span class="${off ? 'danger-text' : 'ok-text'}" title="Pattern: ${esc(String(pat.gauge.sts||'?'))}×${esc(String(pat.gauge.rows||'?'))} per ${pat.gauge.unit==='cm'?'10 cm':'4 in'}">(${off ? parts.join(', ') : 'on gauge'} vs pattern)</span>`;
 }
 /* Project notes on the list row: first line as a one-line preview; tap to
    expand the full text (line breaks preserved). */
@@ -3228,7 +3342,7 @@ function shopProjectGap(id){
     note: 'Project gap',
     sourceType: 'project', sourceId: p.id, sourceName: p.name
   });
-  wgToast(`Added ~${Math.round(gapInfo.gap)} yd to your shopping list for "${p.name}".`, "success");
+  wgToast(`Added ~${toDisplayLength(gapInfo.gap)} ${unitLabel()} to your shopping list for "${p.name}".`, "success");
   renderTab();
 }
 
@@ -3645,7 +3759,7 @@ function renderShowcaseCard(p){
         <p style="margin:0; font-weight:600; font-family:'Fraunces',serif;">${esc(p.name)}</p>
         <button class="del-btn" onclick="showProjectForm('${p.id}')" aria-label="Edit project, add photos" title="Edit / add photos" style="flex-shrink:0;">${ICONS.pencil}</button>
       </div>
-      ${p.patternName ? `<p class="note" style="margin:2px 0 0;">${esc(p.patternName)}</p>` : ''}
+      ${p.patternName ? `<p class="note" style="margin:2px 0 0;">${p.patternId && STATE.patterns.some(pt=>pt.id===p.patternId) ? `<button type="button" class="pattern-inline-link" onclick="openPatternInLibrary('${p.patternId}')">${ICONS.book} ${esc(p.patternName)}</button>` : esc(p.patternName)}${p.patternSize ? ` · size ${esc(p.patternSize)}` : ''}</p>` : ''}
       <div style="display:flex; align-items:center; gap:6px; margin-top:8px; flex-wrap:wrap;">
         ${usedYarns.map(y=>`<span class="dot" style="background:${y.colorHex}" title="${esc(y.name)}"></span>`).join('')}
         ${garmentBadge ? `<span class="note">${esc(garmentBadge)}</span>` : ''}
@@ -3740,6 +3854,7 @@ function addShoppingItem(item){
     quantity: item.quantity || 1,
     note: item.note || null,
     sourceType: item.sourceType || 'manual',   // 'project' | 'palette' | 'pattern' | 'manual'
+    yarnId: item.yarnId || null,               // stash yarn this tops up, if any
     sourceId: item.sourceId || null,
     sourceName: item.sourceName || null,
     done: false,
@@ -5909,7 +6024,8 @@ function patternSizesCovered(sizes, have){
 function patternStashMatches(pat){
   const r = patternYardageRange(pat);
   if(!pat.weightCategory || !r) return null;
-  const same = STATE.yarns.filter(y=>y.weightCategory===pat.weightCategory && (Number(y.yardageRemaining)||0)>0);
+  // Yarn set aside for a project isn't free for another pattern.
+  const same = STATE.yarns.filter(y=>y.weightCategory===pat.weightCategory && yarnStatus(y)!=='allocated' && (Number(y.yardageRemaining)||0)>0);
   const enough = same.filter(y=>(Number(y.yardageRemaining)||0) >= r.min)
     .sort((a,b)=>(Number(b.yardageRemaining)||0)-(Number(a.yardageRemaining)||0));
   const best = same.slice().sort((a,b)=>(Number(b.yardageRemaining)||0)-(Number(a.yardageRemaining)||0))[0] || null;
@@ -5943,7 +6059,7 @@ async function shopForPattern(id){
     size = sizes.find(x=>x.label===pick); need = size.yardage;
   }
   if(!need) return;
-  const same = STATE.yarns.filter(y => pat.weightCategory && y.weightCategory === pat.weightCategory);
+  const same = STATE.yarns.filter(y => pat.weightCategory && y.weightCategory === pat.weightCategory && yarnStatus(y)!=='allocated');
   const opts = patternShoppingOptions(need, same);
   if(!opts.length){ wgToast(`You already have enough ${pat.weightCategory} yarn for this${size ? ` in ${size.label}` : ''}.`); return; }
   const forWhat = `${pat.name}${size ? ` (${size.label})` : ''}`;
@@ -5967,7 +6083,8 @@ async function shopForPattern(id){
     yardage: choice.yards,
     quantity: 1,
     note,
-    sourceType: 'pattern', sourceId: pat.id, sourceName: pat.name
+    sourceType: 'pattern', sourceId: pat.id, sourceName: pat.name,
+    yarnId: y ? y.id : null
   });
   wgToast(`Added ~${toDisplayLength(choice.yards).toLocaleString()} ${unitLabel()} to your shopping list for ${forWhat}.`, 'success');
   renderTab();
@@ -6119,7 +6236,7 @@ function renderPatternCard(pat){
     </div>` : ''}
     ${pat.notes ? renderProjectNotes(pat.notes) : ''}
     ${renderPatternStashLine(pat)}
-    ${projects.length ? `<p class="note" style="margin:6px 0 0; font-size:0.72rem;">Projects: ${projects.map(p=>esc(p.name)).join(', ')}</p>` : ''}
+    ${projects.length ? `<p class="note" style="margin:6px 0 0; font-size:0.72rem;">Projects: ${projects.map(p=>`<button type="button" class="pattern-inline-link" onclick="openProjectInList('${p.id}')">${esc(p.name)}</button>${p.patternSize ? ` (${esc(p.patternSize)})` : ''} <span class="note">· ${esc(p.status)}</span>`).join(', ')}</p>` : ''}
     <div class="pattern-actions">
       ${STATE.online ? `<button class="btn btn-ghost btn-small" onclick="startProjectFromPattern('${pat.id}')">${ICONS.sparkles} Start project</button>` : ''}
       ${pat.gauge && (pat.gauge.sts||pat.gauge.rows) ? `<button class="btn btn-ghost btn-small" onclick="patternToGauge('${pat.id}')">📐 Check gauge</button>` : ''}
@@ -6340,9 +6457,16 @@ function renderShoppingGroup(group){
   const done = rep.done;
   const totalQty = group.reduce((s,i)=>s+(Number(i.quantity)||1),0);
   const spec = [rep.colorName, rep.weight, rep.fiber, rep.yardage?('~'+toDisplayLength(rep.yardage)+' '+unitLabel()):''].filter(Boolean).join(' · ') || 'Yarn';
-  const sources = group.filter(i=>i.sourceType!=='manual' && i.sourceName).map(i=>i.sourceName);
-  const uniqueSources = [...new Set(sources)];
-  const srcLine = uniqueSources.length ? `<p class="note" style="margin:2px 0 0;">for: ${uniqueSources.map(esc).join(', ')}</p>` : '';
+  const srcLinks = [];
+  group.filter(i=>i.sourceType!=='manual' && i.sourceName).forEach(i => {
+    const key = i.sourceType + ':' + (i.sourceId||i.sourceName);
+    if(srcLinks.some(x=>x.key===key)) return;
+    let html = esc(i.sourceName);
+    if(i.sourceType==='project' && STATE.projects.some(p=>p.id===i.sourceId)) html = `<button type="button" class="pattern-inline-link" onclick="openProjectInList('${i.sourceId}')">${esc(i.sourceName)}</button>`;
+    else if(i.sourceType==='pattern' && STATE.patterns.some(p=>p.id===i.sourceId)) html = `<button type="button" class="pattern-inline-link" onclick="openPatternInLibrary('${i.sourceId}')">${esc(i.sourceName)}</button>`;
+    srcLinks.push({ key, html });
+  });
+  const srcLine = srcLinks.length ? `<p class="note" style="margin:2px 0 0;">for: ${srcLinks.map(x=>x.html).join(', ')}</p>` : '';
   const ids = group.map(i=>i.id);
   return `<div class="card" style="display:flex; align-items:flex-start; gap:12px; ${done?'opacity:0.55;':''}">
     <button onclick="toggleShoppingGroupDone('${ids.join(',')}')" aria-label="Toggle done" style="background:none;border:1px solid var(--border);border-radius:5px;width:22px;height:22px;flex-shrink:0;cursor:pointer;color:var(--forest);font-size:0.9rem;line-height:1;margin-top:2px;">${done?'✓':''}</button>
@@ -6354,6 +6478,7 @@ function renderShoppingGroup(group){
         <a class="btn btn-ghost btn-small" href="${esc(googleSearchUrl(rep))}" target="_blank" rel="noopener">Search Google</a>
         <a class="btn btn-ghost btn-small" href="${esc(ravelrySearchUrl(rep))}" target="_blank" rel="noopener">Search Ravelry</a>
         ${group.length===1 ? `<button class="btn btn-ghost btn-small" onclick="editShoppingItem('${rep.id}')">Edit</button>` : ''}
+        ${done && STATE.online ? `<button class="btn btn-primary btn-small" onclick="addShoppingItemToStash('${rep.id}')">${ICONS.plus} Add to stash</button>` : ''}
       </div>
     </div>
     <button class="del-btn" onclick="removeShoppingGroup('${ids.join(',')}')" aria-label="Remove">${ICONS.trash}</button>
@@ -6366,6 +6491,46 @@ function toggleShoppingGroupDone(idsStr){
   persist();
   renderTab();
 }
+/* A bought shopping item → stash: top up the yarn it was for (when it came
+   from "more of this yarn"), or open the yarn form pre-filled with what's known. */
+async function addShoppingItemToStash(id){
+  const it = STATE.shoppingList.find(i=>i.id===id);
+  if(!it) return;
+  const yarn = it.yarnId && STATE.yarns.find(y=>y.id===it.yarnId);
+  if(yarn){
+    const choice = await wgChoose(`You bought ${it.yardage ? '~'+toDisplayLength(it.yardage).toLocaleString()+' '+unitLabel()+' of ' : ''}${yarnDisplayName(yarn)}.`, { title:'Add to stash', choices:[
+      { label:`Add it to ${yarnDisplayName(yarn)}`, detail:'Same yarn — adds the length to what you have', value:'topup', primary:true },
+      { label:'Log it as a separate yarn', detail:'e.g. a different dye lot', value:'new' }]});
+    if(!choice) return;
+    if(choice === 'topup'){
+      const amt = await wgPrompt(`How much did you buy (${unitLabel()})?`, { title:'Add to stash', defaultValue: it.yardage ? String(toDisplayLength(it.yardage)) : '', okLabel:'Add' });
+      const yd = Math.round(fromInputLength(amt));
+      if(!amt || !(yd > 0)) return;
+      STATE.yarns = STATE.yarns.map(y => y.id===yarn.id ? { ...y, yardageRemaining: (Number(y.yardageRemaining)||0) + yd } : y);
+      STATE.shoppingList = STATE.shoppingList.filter(i=>i.id!==id);
+      await persist();
+      renderTab();
+      wgToast(`Added ${toDisplayLength(yd).toLocaleString()} ${unitLabel()} to ${yarnDisplayName(yarn)}.`, 'success');
+      return;
+    }
+  }
+  cleanupOpenForms();
+  STATE.tab = 'stash';
+  showYarnForm();
+  if(it.hex) pendingColorHex = it.hex;
+  render();
+  const set = (elId, val) => { const el = document.getElementById(elId); if(el && val != null && val !== '') el.value = val; };
+  set('yf-colorway', it.colorName);
+  if(it.weight && WEIGHTS.includes(it.weight)) set('yf-weightcat', it.weight);
+  set('yf-fiber', it.fiber);
+  set('yf-quantity', it.quantity > 1 ? it.quantity : null);
+  set('yf-purchasedate', todayStr());
+  if(it.hex) set('yf-colorhex', it.hex);
+  pendingShoppingToStashId = id;
+  scrollToTop();
+  wgToast('Add the brand, yarn name and length, then save — the item comes off your list.');
+}
+let pendingShoppingToStashId = null;   // shopping item being turned into a yarn
 function removeShoppingGroup(idsStr){
   const ids = idsStr.split(',');
   STATE.shoppingList = STATE.shoppingList.filter(i=>!ids.includes(i.id));

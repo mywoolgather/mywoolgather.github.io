@@ -398,6 +398,25 @@
     ok('shopping: no yarn of that weight → buy new only', patternShoppingOptions(500, []).map(o=>o.kind).join()==='new');
   }catch(e){ ok('yarn/pattern shopping block threw: '+e.message, false); }
 
+  // --- Tabs talking to each other ---
+  try{
+    ok('pattern status: WIP project queues a saved pattern', patternStatusForProject('saved','WIP')==='queued');
+    ok('pattern status: finished project → made', patternStatusForProject('queued','Finished')==='made');
+    ok('pattern status: never goes backwards, frogged changes nothing', patternStatusForProject('made','Planned')==='made' && patternStatusForProject('saved','Frogged')==='saved');
+    ok('finish date: set when finishing, kept if already set', withStatusDates({ status:'Finished' }).finishDate===todayStr() && withStatusDates({ status:'Finished', finishDate:'2026-01-02' }).finishDate==='2026-01-02' && !withStatusDates({ status:'WIP' }).finishDate);
+    const g = compareGauge({ sts:18, rows:24, unit:'in' }, { sts:18, rows:28, unit:'in' });
+    ok('gauge vs pattern: same stitches on gauge, fewer rows looser', g.sts==='on' && g.rows==='loose');
+    const gc = compareGauge({ sts:22, rows:null, unit:'cm' }, { sts:20, rows:28, unit:'in' });
+    ok('gauge vs pattern: 4 in vs 10 cm converted; more sts = tighter', gc.sts==='tight' && gc.rows===null);
+    const pats = [{ id:'q1', name:'Beret', status:'queued', weightCategory:'DK', yardage:200 }, { id:'q2', name:'Vest', status:'queued', weightCategory:'DK', sizes:[{label:'S',yardage:900},{label:'M',yardage:1000}] },
+      { id:'q3', name:'Socks', status:'queued', weightCategory:'Fingering', yardage:400 }, { id:'q4', name:'Started', status:'queued', weightCategory:'DK', yardage:100 }, { id:'s1', name:'Saved one', status:'saved', weightCategory:'DK', yardage:10 }];
+    const yarns = [{ id:'a', weightCategory:'DK', yardageRemaining:950, status:'available' }, { id:'b', weightCategory:'DK', yardageRemaining:5000, status:'allocated' }];
+    const up = upNextPatterns(pats, yarns, [{ patternId:'q4', status:'WIP' }]);
+    ok('up next: queued only, minus ones already started', up.map(m=>m.pattern.id).sort().join()==='q1,q2,q3');
+    ok('up next: ready ones first, with sizes covered', up[0].ready && up[1].ready && up.find(m=>m.pattern.id==='q2').covers==='S');
+    ok('up next: allocated yarn not counted; none of that weight → not ready', up.find(m=>m.pattern.id==='q3').ready===false && up.find(m=>m.pattern.id==='q3').yarn===null);
+  }catch(e){ ok('connected tabs block threw: '+e.message, false); }
+
   // --- closenessPercent monotonic ---
   try{
     ok('closeness identical = 100', closenessPercent(0) === 100);

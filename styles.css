@@ -720,3 +720,13 @@ textarea{ resize:vertical; }
 .yarn-patterns summary{ cursor:pointer; }
 .yarn-patterns ul{ margin:4px 0 0; padding-left:16px; }
 .yarn-patterns li{ margin:2px 0; }
+
+/* Overview: up next from the pattern queue */
+.up-next{ margin-top:4px; margin-bottom:14px; }
+.up-next .chart-title{ margin:0 0 6px; font-size:0.88rem; font-weight:500; }
+.up-next-row{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:6px 0; border-top:1px solid var(--border); }
+.up-next-row:first-of-type{ border-top:none; }
+.up-next-row .note{ flex:1; min-width:140px; font-size:0.78rem; }
+/* Brief highlight when jumping to a project from elsewhere */
+.project-row.flash{ animation: wg-flash 1.8s ease; }
+@keyframes wg-flash{ 0%,40%{ background:color-mix(in srgb, var(--lilac) 22%, transparent); } 100%{ background:transparent; } }
