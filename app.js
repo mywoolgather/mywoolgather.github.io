@@ -767,70 +767,304 @@ function categorizeFiber(text){
    fiber terms) rather than trusting the raw read. The photo → text step
    is tesseract.js; this function is the "make sense of it" step.
 ================================================================= */
-function parseYarnLabel(rawText){
-  const text = rawText || '';
-  const lower = text.toLowerCase();
-  const lines = text.split('\n').map(l=>l.trim()).filter(Boolean);
-  const out = { brand:null, line:null, fiber:null, weightCategory:null, skeinYardage:null, skeinWeightGrams:null, colorway:null, dyeLot:null };
-
-  // --- Brand: match against known preset brands (fuzzy, case-insensitive) ---
-  const brands = presetBrands();
-  for(const b of brands){
-    if(lower.includes(b.toLowerCase())){ out.brand = b; break; }
+/* Vocabulary the label reader matches against: preset brands/lines plus the
+   brands and yarn names already in this person's stash (so their indie
+   dyers are recognised too). */
+function labelVocabulary(){
+  const brands = new Map();   // brand → Set(lines)
+  const add = (b, l) => { if(!b) return; if(!brands.has(b)) brands.set(b, new Set()); if(l) brands.get(b).add(l); };
+  (YARN_PRESETS||[]).forEach(p => add(p.brand, p.line));
+  (typeof STATE !== 'undefined' && STATE.yarns || []).forEach(y => add(y.brand, y.line));
+  return [...brands].map(([brand, lines]) => ({ brand, lines: [...lines] }));
+}
+// Pure: edit distance, for matching names through OCR slips ("Cascade Yams").
+function levenshtein(a, b){
+  if(a === b) return 0;
+  const m = a.length, n = b.length;
+  if(!m) return n; if(!n) return m;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for(let i = 1; i <= m; i++){
+    const cur = [i];
+    for(let j = 1; j <= n; j++) cur[j] = Math.min(prev[j] + 1, cur[j-1] + 1, prev[j-1] + (a[i-1] === b[j-1] ? 0 : 1));
+    prev = cur;
   }
-  // If brand found, try to find its matching line from presets in the text.
-  if(out.brand){
-    const lines2 = YARN_PRESETS.filter(p=>p.brand===out.brand);
-    for(const p of lines2){
-      if(lower.includes(p.line.toLowerCase())){ out.line = p.line; break; }
+  return prev[n];
+}
+const labelNorm = s => String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-z0-9&]+/g,' ').trim();
+/* Pure: best place a name appears in the text, allowing small OCR errors —
+   compares the name with every run of the same number of words. Short names
+   must match exactly; longer ones may be off by ~1 character in 6.
+   Returns a score 0..1 (1 = exact) or 0. */
+function fuzzyFind(name, textNorm){
+  const target = labelNorm(name);
+  if(!target) return 0;
+  if((' ' + textNorm + ' ').includes(' ' + target + ' ')) return 1;
+  const words = textNorm.split(' '), k = target.split(' ').length;
+  const allowed = target.replace(/ /g,'').length >= 6 ? Math.floor(target.length / 6) : 0;
+  if(!allowed) return 0;
+  let best = 0;
+  for(let i = 0; i + k <= words.length; i++){
+    const cand = words.slice(i, i + k).join(' ');
+    const d = levenshtein(cand, target);
+    if(d <= allowed) best = Math.max(best, 1 - d / target.length);
+  }
+  return best;
+}
+// Fiber words in English, French, German, Spanish, Italian and Dutch → one name.
+const FIBER_VOCAB = [
+  ['Merino', ['merino','merinos','merinowolle','merinowol']],
+  ['Alpaca', ['alpaca','alpaga','alpaka']],
+  ['Mohair', ['mohair','kid mohair']],
+  ['Cashmere', ['cashmere','cachemire','kaschmir','cachemira','cashmir']],
+  ['Silk', ['silk','soie','seide','seda','seta','zijde','mulberry silk']],
+  ['Linen', ['linen','lin','leinen','lino','linnen','flax']],
+  ['Cotton', ['cotton','coton','baumwolle','algodon','cotone','katoen']],
+  ['Acrylic', ['acrylic','acrylique','polyacryl','polyacrylic','acrilico','acryl']],
+  ['Nylon', ['nylon','polyamide','polyamid','poliamida','poliammide']],
+  ['Polyester', ['polyester','poliester','poliestere']],
+  ['Viscose', ['viscose','viskose','rayon']],
+  ['Bamboo', ['bamboo','bambou','bambus','bambu']],
+  ['Yak', ['yak']], ['Camel', ['camel','kamel']], ['Llama', ['llama','lama']],
+  ['Wool', ['wool','laine','wolle','lana','wol','lan']]
+];
+const ENGLISH_FIBERS = new Set(['merino','alpaca','mohair','kid mohair','cashmere','silk','mulberry silk','linen','flax','cotton','acrylic','nylon','polyester','viscose','rayon','bamboo','yak','camel','llama','wool']);
+function fiberCanonical(phrase){
+  const words = labelNorm(phrase).split(' ');
+  for(const [name, keys] of FIBER_VOCAB) if(keys.some(k => k.includes(' ') ? labelNorm(phrase).includes(k) : words.includes(k))) return { name, english: words.some(w => ENGLISH_FIBERS.has(w)) };
+  // One OCR slip in a longer fiber word ("Woo!", "Acrylc", "Cottom").
+  for(const [name, keys] of FIBER_VOCAB) if(keys.some(k => k.length >= 4 && words.some(w => w.length >= 3 && Math.abs(w.length - k.length) <= 1 && levenshtein(w, k) <= 1))) return { name, english: false };
+  return null;
+}
+/* Pure: "65% Wool 35% Alpaca / 65% Laine 35% Alpaga" → "65% Wool, 35% Alpaca".
+   Translations of the same blend are dropped; an English phrase is kept as
+   written ("100% Superwash Merino Wool"), others become the English name. */
+function parseLabelFiber(text){
+  const out = [];
+  let total = 0;
+  const re = /(\d{1,3})\s*%\s*([^%\d\/|,;()\n]{2,40})/g;
+  let m;
+  while((m = re.exec(text))){
+    const pct = Number(m[1]);
+    if(pct > 100) continue;
+    const phrase = m[2].replace(/\s+/g,' ').trim();
+    let c = fiberCanonical(phrase);
+    // "100% Baumwolle / Cotton": the English word may follow the slash.
+    let label = c && c.english ? phrase : null;
+    if(c && !c.english){
+      const after = text.slice(m.index + m[0].length, m.index + m[0].length + 30).match(/^\s*\/\s*([A-Za-z][A-Za-z ]{2,25})/);
+      const alt = after && fiberCanonical(after[1]);
+      if(alt && alt.english && alt.name === c.name) label = after[1].trim();
     }
+    if(!c) continue;
+    if(out.some(f => f.name === c.name && (f.pct === pct || !pct))) continue;   // a translation
+    if(total + pct > 100) continue;
+    out.push({ pct, name: c.name, label: label || c.name });
+    total += pct;
+  }
+  // A blend with one percentage lost to OCR ("0% Acrylic / 20% Wool"): it's the rest.
+  const lost = out.filter(f => !f.pct);
+  if(lost.length === 1 && out.length > 1 && total < 100) lost[0].pct = 100 - total;
+  for(const f of lost) if(!f.pct) out.splice(out.indexOf(f), 1);
+  if(out.length) return out.map(f => `${f.pct}% ${f.label.replace(/\s+(?:and|und|et|y|e)$/i,'')}`).join(', ');
+  const lone = fiberCanonical(text);
+  return lone ? lone.name : null;
+}
+/* Pure: weight category from a label. The CYC symbol ("(4) MEDIUM") wins;
+   then names, longest first so "super bulky" isn't read as "bulky"; then ply. */
+function parseLabelWeight(text){
+  const t = ' ' + labelNorm(text) + ' ';
+  const cyc = text.match(/\(?\b([0-7])\)?\s*[-–]?\s*(lace|super\s*fine|fine|light|medium|bulky|super\s*bulky|jumbo)\b/i);
+  if(cyc) return ['Lace','Fingering','Sport','DK','Worsted','Bulky','Super Bulky','Super Bulky'][Number(cyc[1])];
+  const names = [['Super Bulky',['super bulky','super chunky','jumbo','roving']],['DK',['light worsted','double knitting','double knit','dk']],
+    ['Bulky',['bulky','chunky']],['Worsted',['worsted','aran','afghan']],['Sport',['sport']],['Fingering',['fingering','sock weight','sock yarn','super fine']],['Lace',['lace weight','lace','cobweb']]];
+  for(const [cat, keys] of names) if(keys.some(k => t.includes(' ' + k + ' '))) return cat;
+  const ply = text.match(/\b(\d{1,2})\s*-?\s*ply\b/i);
+  if(ply){ const p = Number(ply[1]); return p <= 2 ? 'Lace' : p <= 4 ? 'Fingering' : p === 5 ? 'Sport' : p === 8 ? 'DK' : p <= 12 ? 'Worsted' : 'Bulky'; }
+  return null;
+}
+/* Fix the usual OCR digit slips inside numbers next to a unit:
+   "1OO g" → "100 g", "22O yds" → "220 yds", "l00" → "100". */
+function fixOcrDigits(text){
+  return text.replace(/\b[0-9OoIl|]{2,5}(?=\s*(?:g|gr|grams?|m|meters?|metres?|yds?|yards?|oz)\b)/g, s => /\d/.test(s) ? s.replace(/[Oo]/g,'0').replace(/[Il|]/g,'1') : s);
+}
+/* =================================================================
+   Label OCR parsing — turns raw OCR text into confident field guesses.
+   Philosophy: only fill a field when reasonably confident; a blank beats a
+   confident-wrong guess. Names are reconciled against known vocabulary
+   (preset and stash brands/lines, fiber and weight terms in several
+   languages) with small OCR errors allowed. The photo → text step is
+   tesseract.js (readYarnLabel); this is the "make sense of it" step.
+================================================================= */
+function parseYarnLabel(rawText, vocab){
+  const text = fixOcrDigits(String(rawText || '').replace(/[“”„]/g,'"').replace(/[‘’]/g,"'").replace(/[–—]/g,'-'));
+  const norm = labelNorm(text);
+  const out = { brand:null, line:null, fiber:null, weightCategory:null, skeinYardage:null, skeinWeightGrams:null, colorway:null, dyeLot:null };
+  const V = vocab || labelVocabulary();
+
+  // --- Brand and line: best fuzzy match; a line confirms its brand ---
+  let best = null;
+  for(const v of V){
+    const bs = fuzzyFind(v.brand, norm);
+    // Longest line names first, so "Wool-Ease Thick & Quick" beats "Wool-Ease".
+    const lines = [...v.lines].sort((a,b) => labelNorm(b).length - labelNorm(a).length);
+    let ls = 0, line = null;
+    for(const l of lines){ const sc = fuzzyFind(l, norm); if(sc > ls){ ls = sc; line = l; } if(sc === 1) break; }
+    // A line name on its own (e.g. "220") is too weak without its brand.
+    const score = bs ? bs + (ls ? ls : 0) : 0;
+    if(score && (!best || score > best.score)) best = { score, brand: v.brand, line: ls ? line : null };
+  }
+  if(best){ out.brand = best.brand; out.line = best.line; }
+
+  out.weightCategory = parseLabelWeight(text);
+  out.fiber = parseLabelFiber(text);
+
+  // --- Length: yards if given, else metres → yards. Plausible skeins only. ---
+  const num = s => Number(String(s).replace(/,(?=\d{3}\b)/g,'').replace(',', '.'));
+  const yd = [...text.matchAll(/(\d[\d,.]*)\s*(?:yds?|yards?|yardage)\b/gi)].map(m => num(m[1])).find(n => n >= 10 && n <= 3000);
+  const mt = [...text.matchAll(/(\d[\d,.]*)\s*(?:m|meters?|metres?|mtrs?)\b/gi)].map(m => num(m[1])).find(n => n >= 10 && n <= 3000);
+  if(yd) out.skeinYardage = Math.round(yd);
+  else if(mt) out.skeinYardage = Math.round(mt * YD_PER_M);
+
+  // --- Skein weight: grams, else ounces ---
+  const g = [...text.matchAll(/(\d[\d,.]*)\s*(?:g|gr|grs|grams?|grammes?)\b/gi)].map(m => num(m[1])).find(n => n >= 5 && n <= 1000);
+  const oz = [...text.matchAll(/(\d+(?:[.,]\d+)?)\s*(?:oz|ounces?)\b/gi)].map(m => num(m[1])).find(n => n > 0 && n <= 35);
+  if(g) out.skeinWeightGrams = Math.round(g);
+  else if(oz) out.skeinWeightGrams = Math.round(oz * 28.35);
+
+  // --- Dye lot: the first lot-like word followed by a code with a digit ---
+  // (Keyword and value are matched separately so "…dye lot to dye lot / Lot: 6342"
+  // can't use up the second "Lot" as a value.)
+  for(const k of text.matchAll(/\b(?:dye\s*lot|lot|batch|partie|bain|lote|charge|farbpartie|lotto)\b/gi)){
+    const m = text.slice(k.index + k[0].length).match(/^\s*(?:no\.?|nr\.?|#)?\s*[:;.#]?\s*([A-Z0-9][A-Z0-9-]{1,11})\b/i);
+    if(m && /\d/.test(m[1])){ out.dyeLot = m[1]; break; }
   }
 
-  // --- Weight category: match known weight words (+ common synonyms) ---
-  const weightSynonyms = {
-    'Lace':['lace','2 ply','2-ply'],
-    'Fingering':['fingering','sock','4 ply','4-ply','super fine'],
-    'Sport':['sport'],
-    'DK':['dk','double knit','light worsted'],
-    'Worsted':['worsted','afghan','medium','aran','10 ply','10-ply'],
-    'Bulky':['bulky','chunky','12 ply'],
-    'Super Bulky':['super bulky','super chunky','roving']
-  };
-  for(const [cat,syns] of Object.entries(weightSynonyms)){
-    if(syns.some(s=>lower.includes(s))){ out.weightCategory = cat; break; }
+  // --- Colour: needs a separator or a number, so "Colours may vary" isn't one ---
+  for(const k of text.matchAll(/\b(?:colou?rway|colou?r|col|shade|farbe|coloris|couleur|nuance|tono|colore|kleur)\b/gi)){
+    const m = text.slice(k.index + k[0].length).match(/^\.?(?:\s*\/\s*[A-Za-z]+\.?)?\s*(?:(?:no\.?|nr\.?|n°|#)\s*|:\s*|(?=\d))([A-Za-z0-9][A-Za-z0-9 '&-]{0,28})/i);
+    if(!m) continue;
+    let v = m[1].replace(/\s+(?:dye\s*lot|lot|partie|batch)\b.*$/i,'').trim();
+    if(/^(?:may|can|might|will|varies|vary|fast|card)\b/i.test(v)) continue;
+    if(v){ out.colorway = v; break; }
   }
 
-  // --- Fiber: only accept if a known fiber term appears (reuse categorizer) ---
-  const fiberTerms = ['wool','merino','alpaca','cotton','acrylic','silk','linen','flax','mohair','cashmere','bamboo','nylon','polyester','superwash'];
-  if(fiberTerms.some(t=>lower.includes(t))){
-    // Try to grab the actual fiber phrase (e.g. "100% Superwash Merino Wool").
-    const fiberLine = lines.find(l=>/%|\bwool\b|\bcotton\b|\bacrylic\b|\balpaca\b|\bmerino\b/i.test(l) && l.length<60);
-    out.fiber = fiberLine || null;
-  }
-
-  // --- Yardage: look for "### yd/yds/yards" or "### m/meters" ---
-  const ydMatch = text.match(/(\d{2,4})\s*(?:yd|yds|yards|yardage)/i);
-  const mMatch = text.match(/(\d{2,4})\s*(?:m|meter|meters|metres)\b/i);
-  if(ydMatch) out.skeinYardage = Number(ydMatch[1]);
-  else if(mMatch) out.skeinYardage = Math.round(Number(mMatch[1]) * 1.0936); // m→yd
-
-  // --- Skein weight: "### g/grams/gr" or "### oz" ---
-  const gMatch = text.match(/(\d{2,4})\s*(?:g|gr|grams|gramme)\b/i);
-  const ozMatch = text.match(/([\d.]+)\s*(?:oz|ounce)/i);
-  if(gMatch) out.skeinWeightGrams = Number(gMatch[1]);
-  else if(ozMatch) out.skeinWeightGrams = Math.round(Number(ozMatch[1]) * 28.35); // oz→g
-
-  // --- Dye lot: "lot ####" or "dye lot: ####" ---
-  const lotMatch = text.match(/(?:dye\s*lot|lot|batch)\s*[:#]?\s*([A-Za-z0-9-]{2,12})/i);
-  if(lotMatch) out.dyeLot = lotMatch[1];
-
-  // --- Colorway / color number: "color ###" or "colorway: ___" ---
-  const colorMatch = text.match(/(?:colou?rway|colou?r|shade)\s*[:#]?\s*([A-Za-z0-9 -]{1,24})/i);
-  if(colorMatch) out.colorway = colorMatch[1].trim();
-
-  // Confidence: how many fields did we actually resolve?
   out._fieldsFound = Object.entries(out).filter(([k,v])=>k[0]!=='_' && v!=null && v!=='').length;
   return out;
+}
+
+/* Pure: contrast settings for a label photo from its grey levels (0–255):
+   stretch the 2nd–98th percentile to full range, and invert light-on-dark
+   labels (OCR reads dark text on light best). */
+function ocrLevels(grey){
+  const hist = new Array(256).fill(0);
+  for(const v of grey) hist[v]++;
+  const n = grey.length || 1;
+  const pct = p => { let acc = 0; for(let i = 0; i < 256; i++){ acc += hist[i]; if(acc >= n * p) return i; } return 255; };
+  const lo = pct(0.02), hi = pct(0.98), median = pct(0.5);
+  return { lo, hi: Math.max(hi, lo + 1), invert: median < 110 };
+}
+/* Pure: 3×3 median filter on greyscale pixels — removes speckle noise
+   (dust, JPEG grain, fabric texture) while keeping letter edges. */
+function medianFilter3(src, w, h){
+  const out = new Uint8Array(src.length);
+  const win = new Array(9);
+  for(let y = 0; y < h; y++){
+    for(let x = 0; x < w; x++){
+      let k = 0;
+      for(let dy = -1; dy <= 1; dy++){
+        const yy = Math.min(h - 1, Math.max(0, y + dy));
+        for(let dx = -1; dx <= 1; dx++) win[k++] = src[yy * w + Math.min(w - 1, Math.max(0, x + dx))];
+      }
+      win.sort((a,b) => a - b);
+      out[y * w + x] = win[4];
+    }
+  }
+  return out;
+}
+/* Pure: even out lighting (a shadow across the label, a dim corner) by
+   dividing each pixel by the local background — a wide box blur, done with
+   running sums so it's fast. Dark text on light paper keeps its contrast
+   wherever it sits. */
+function flattenBackground(src, w, h, r){
+  const tmp = new Float32Array(src.length), bg = new Float32Array(src.length);
+  for(let y = 0; y < h; y++){            // horizontal pass
+    let sum = 0, n = 0;
+    for(let x = -r; x <= r; x++) if(x >= 0 && x < w){ sum += src[y*w + x]; n++; }
+    for(let x = 0; x < w; x++){
+      tmp[y*w + x] = sum / n;
+      const out = x - r, inn = x + r + 1;
+      if(out >= 0){ sum -= src[y*w + out]; n--; }
+      if(inn < w){ sum += src[y*w + inn]; n++; }
+    }
+  }
+  for(let x = 0; x < w; x++){            // vertical pass
+    let sum = 0, n = 0;
+    for(let y = -r; y <= r; y++) if(y >= 0 && y < h){ sum += tmp[y*w + x]; n++; }
+    for(let y = 0; y < h; y++){
+      bg[y*w + x] = sum / n;
+      const out = y - r, inn = y + r + 1;
+      if(out >= 0){ sum -= tmp[out*w + x]; n--; }
+      if(inn < h){ sum += tmp[inn*w + x]; n++; }
+    }
+  }
+  const out = new Uint8Array(src.length);
+  for(let p = 0; p < src.length; p++) out[p] = Math.max(0, Math.min(255, Math.round(src[p] / Math.max(1, bg[p]) * 235)));
+  return out;
+}
+/* Photo → canvas ready for OCR: sized so text is big enough (long side
+   ~1800 px, small photos are enlarged), greyscale, contrast stretched,
+   light-on-dark inverted. */
+async function prepareLabelImage(blob){
+  const bmp = await createImageBitmap(blob);
+  const k = Math.min(3, 1800 / Math.max(bmp.width, bmp.height));
+  const w = Math.max(1, Math.round(bmp.width * k)), h = Math.max(1, Math.round(bmp.height * k));
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const ctx = c.getContext('2d');
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(bmp, 0, 0, w, h);
+  const img = ctx.getImageData(0, 0, w, h), d = img.data;
+  const raw = new Uint8Array(w * h);
+  for(let i = 0, p = 0; i < d.length; i += 4, p++) raw[p] = Math.round(0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2]);
+  let grey = medianFilter3(raw, w, h);   // speckle out first
+  // Light-on-dark labels are flipped before the lighting is evened out.
+  if(ocrLevels(grey).invert) for(let p = 0; p < grey.length; p++) grey[p] = 255 - grey[p];
+  grey = flattenBackground(grey, w, h, Math.max(15, Math.round(Math.max(w, h) / 25)));
+  const { lo, hi } = ocrLevels(grey);
+  const scale = 255 / (hi - lo);
+  for(let p = 0, i = 0; p < grey.length; p++, i += 4){
+    const v = Math.max(0, Math.min(255, (grey[p] - lo) * scale));
+    d[i] = d[i+1] = d[i+2] = v; d[i+3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  return c;
+}
+/* Photo → parsed label. Reads the prepared image; if that finds little
+   (curved or scattered label text), reads again treating the text as
+   scattered words, and keeps whichever read found more. */
+async function readYarnLabel(file, onProgress){
+  await ensureTesseractLoaded();
+  const usable = await toRenderableImageBlob(file);
+  const canvas = await prepareLabelImage(usable);
+  const worker = await Tesseract.createWorker('eng', 1, { logger: m => { if(onProgress && m.status === 'recognizing text') onProgress(m.progress); } });
+  try{
+    const vocab = labelVocabulary();
+    const read = async img => { const { data } = await worker.recognize(img); const p = parseYarnLabel(data.text || '', vocab); p._text = data.text; return p; };
+    let parsed = await read(canvas);
+    // Weak read: try the untouched photo, then scattered-text mode; keep the best.
+    if(parsed._fieldsFound < 5){
+      const plain = await read(usable);
+      if(plain._fieldsFound > parsed._fieldsFound) parsed = plain;
+    }
+    if(parsed._fieldsFound < 4){
+      await worker.setParameters({ tessedit_pageseg_mode: '11' });   // sparse text
+      const sparse = await read(canvas);
+      if(sparse._fieldsFound > parsed._fieldsFound) parsed = sparse;
+    }
+    return parsed;
+  } finally {
+    worker.terminate();
+  }
 }
 
 /* Icons (minimal hand-drawn line icons) */
@@ -1854,33 +2088,29 @@ async function processLabelScan(file){
   }
   setStatus('Reading label…');
   try{
-    const usable = await toRenderableImageBlob(file);
-    const { data } = await Tesseract.recognize(usable, 'eng', {
-      logger: m => { if(m.status==='recognizing text') setStatus(`Reading label… ${Math.round(m.progress*100)}%`); }
-    });
-    const parsed = parseYarnLabel(data.text || '');
+    const parsed = await readYarnLabel(file, p => setStatus(`Reading label… ${Math.round(p*100)}%`));
     if(parsed._fieldsFound === 0){
       setStatus('');
       wgToast("Couldn't read much from that photo — try a flatter, brighter shot, or enter details manually.", "error");
       return;
     }
-    const fillIfEmpty = (id, val)=>{
-      if(val==null || val==='') return false;
+    const filled = [];
+    const mark = el => { el.classList.add('from-pdf'); el.addEventListener('input', () => el.classList.remove('from-pdf'), { once:true }); el.addEventListener('change', () => el.classList.remove('from-pdf'), { once:true }); };
+    const fillIfEmpty = (id, val, label)=>{
+      if(val==null || val==='') return;
       const el = document.getElementById(id);
-      if(el && !el.value){ el.value = val; return true; }
-      return false;
+      if(el && !String(el.value).trim()){ el.value = val; mark(el); filled.push(label); }
     };
-    let filled = 0;
-    if(parsed.brand && fillIfEmpty('yf-brand', parsed.brand)) filled++;
-    if(parsed.line && fillIfEmpty('yf-line', parsed.line)) filled++;
-    if(parsed.fiber && fillIfEmpty('yf-fiber', parsed.fiber)) filled++;
-    if(parsed.colorway && fillIfEmpty('yf-colorway', parsed.colorway)) filled++;
-    if(parsed.dyeLot && fillIfEmpty('yf-dyelot', parsed.dyeLot)) filled++;
-    if(parsed.skeinYardage && fillIfEmpty('yf-skeinyardage', toDisplayLength(parsed.skeinYardage))) filled++;
-    if(parsed.skeinWeightGrams && fillIfEmpty('yf-skeinweight', parsed.skeinWeightGrams)) filled++;
-    if(parsed.weightCategory){ const el=document.getElementById('yf-weightcat'); if(el){ el.value=parsed.weightCategory; filled++; } }
+    fillIfEmpty('yf-brand', parsed.brand, 'brand');
+    fillIfEmpty('yf-line', parsed.line, 'name');
+    fillIfEmpty('yf-fiber', parsed.fiber, 'fiber');
+    fillIfEmpty('yf-colorway', parsed.colorway, 'colorway');
+    fillIfEmpty('yf-dyelot', parsed.dyeLot, 'dye lot');
+    fillIfEmpty('yf-skeinyardage', parsed.skeinYardage ? toDisplayLength(parsed.skeinYardage) : null, 'skein length');
+    fillIfEmpty('yf-skeinweight', parsed.skeinWeightGrams, 'skein weight');
+    if(parsed.weightCategory){ const el=document.getElementById('yf-weightcat'); if(el && el.value !== parsed.weightCategory){ el.value=parsed.weightCategory; mark(el); filled.push('weight'); } }
     setStatus('');
-    wgToast(filled ? `Prefilled ${filled} field${filled===1?'':'s'} — please double-check before saving.` : 'Read the label, but those fields were already filled.', filled?'success':undefined);
+    wgToast(filled.length ? `Read from the label: ${filled.join(', ')} — tinted fields, please double-check.` : 'Read the label, but those fields were already filled.', filled.length?'success':undefined);
   }catch(err){
     console.error('OCR failed', err);
     setStatus('');

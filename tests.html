@@ -417,6 +417,38 @@
     ok('up next: allocated yarn not counted; none of that weight → not ready', up.find(m=>m.pattern.id==='q3').ready===false && up.find(m=>m.pattern.id==='q3').yarn===null);
   }catch(e){ ok('connected tabs block threw: '+e.message, false); }
 
+  // --- Label scanning: rules and image clean-up ---
+  try{
+    const vocab = [{ brand:'Cascade Yarns', lines:['220','220 Superwash'] }, { brand:'Lion Brand', lines:['Wool-Ease','Wool-Ease Thick & Quick'] }, { brand:'Fernhollow Yarn Co.', lines:['Sock Base'] }];
+    const a = parseYarnLabel('Cascade Yams\n220 Superwash\n100% Superwash Wool\n1OO g / 3.5 oz  22O yds / 200 m\nColor 8010\nLot 7A3\n(4) MEDIUM', vocab);
+    ok('label: brand through an OCR slip ("Yams"), longest line wins', a.brand==='Cascade Yarns' && a.line==='220 Superwash');
+    ok('label: "1OO g" and "22O yds" read as numbers', a.skeinWeightGrams===100 && a.skeinYardage===220);
+    ok('label: CYC symbol (4) MEDIUM → Worsted; colour number; lot', a.weightCategory==='Worsted' && a.colorway==='8010' && a.dyeLot==='7A3');
+    const b = parseYarnLabel('LION BRAND\nWool-Ease Thick & Quick\n80% Acrylic / 20% Wool\n(6) SUPER BULKY\nColours may vary from dye lot to dye lot\nLot: 63421', vocab);
+    ok('label: super bulky is not bulky; "Colours may vary" is not a colourway; lot needs a digit', b.weightCategory==='Super Bulky' && b.colorway===null && b.dyeLot==='63421' && b.line==='Wool-Ease Thick & Quick');
+    ok('label: brand from your own stash', parseYarnLabel('Fernhollow Yarn Co.\nSock Base', vocab).brand==='Fernhollow Yarn Co.');
+    ok('label: a line name alone ("220") is not enough to guess a brand', parseYarnLabel('220 yds', vocab).brand===null);
+    ok('label: unknown brand stays blank', parseYarnLabel('Yarnworks\nCotton DK', vocab).brand===null);
+    ok('fiber: translations dropped, comma list', parseLabelFiber('65% Wool 35% Alpaca\n65% Laine 35% Alpaga\n65% Wolle 35% Alpaka')==='65% Wool, 35% Alpaca');
+    ok('fiber: foreign word → English name', parseLabelFiber('100% Baumwolle / Cotton')==='100% Cotton' && parseLabelFiber('100% Coton')==='100% Cotton');
+    ok('fiber: English phrase kept as written', parseLabelFiber('75% Superwash Merino  25% Nylon')==='75% Superwash Merino, 25% Nylon');
+    ok('fiber: OCR slip and a lost percentage', parseLabelFiber('0% Acrylic / 20% Woo!')==='80% Acrylic, 20% Wool');
+    ok('fiber: none → null', parseLabelFiber('Hand wash cold')===null);
+    ok('weight: ply and names', parseLabelWeight('8 ply')==='DK' && parseLabelWeight('4 ply')==='Fingering' && parseLabelWeight('fingering weight')==='Fingering' && parseLabelWeight('Aran')==='Worsted' && parseLabelWeight('Super chunky')==='Super Bulky');
+    ok('weight: "dk" only as a word', parseLabelWeight('Made in Denmark dkk')===null && parseLabelWeight('Cotton DK')==='DK');
+    ok('colour: German "Farbe Nr. 251", French "Coloris : Bleu"', parseYarnLabel('Farbe / Colour Nr. 251', []).colorway==='251' && parseYarnLabel('Coloris : Bleu Nuit', []).colorway==='Bleu Nuit');
+    ok('fuzzy: exact 1, one slip in a long name, short names exact only', fuzzyFind('Lion Brand', 'lion brand wool')===1 && fuzzyFind('Malabrigo', 'ma1abrigo rios')>0.8 && fuzzyFind('Drops', 'dreps nepal')===0);
+    const lv = ocrLevels(Uint8Array.from([...Array(90).fill(30), ...Array(10).fill(240)]));
+    ok('ocr levels: dark label → invert', lv.invert===true && lv.lo===30);
+    ok('ocr levels: light label stays', ocrLevels(Uint8Array.from([...Array(90).fill(230), ...Array(10).fill(20)])).invert===false);
+    const med = medianFilter3(Uint8Array.from([200,200,200, 200,0,200, 200,200,200]), 3, 3);
+    ok('median filter removes a speck', med[4]===200);
+    const w = 40, h = 4, grad = new Uint8Array(w*h);
+    for(let y=0;y<h;y++) for(let x=0;x<w;x++) grad[y*w+x] = 60 + x*4;   // light falls off to the left
+    const flat = flattenBackground(grad, w, h, 3);
+    ok('flatten: an even gradient becomes even', Math.abs(flat[10] - flat[30]) <= 6);
+  }catch(e){ ok('label block threw: '+e.message, false); }
+
   // --- closenessPercent monotonic ---
   try{
     ok('closeness identical = 100', closenessPercent(0) === 100);
