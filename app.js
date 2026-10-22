@@ -3115,11 +3115,11 @@ function toggleProjectYarn(id){
     const usage = pendingProjectYarnUsage.find(u=>u.yarnId===id);
     if(usage && usage.yardageUsed){
       STATE.yarns = STATE.yarns.map(y => y.id===id ? { ...y, yardageRemaining:(Number(y.yardageRemaining)||0) + usage.yardageUsed } : y);
-      persist();
     }
     pendingProjectYarnUsage = pendingProjectYarnUsage.filter(u=>u.yarnId!==id);
     pendingProjectYarnRequired = pendingProjectYarnRequired.filter(u=>u.yarnId!==id);
     pendingProjectYarnIds = pendingProjectYarnIds.filter(x=>x!==id);
+    if(usage && usage.yardageUsed){ commitProjectYarnUsage(id); persist(); }
   } else {
     pendingProjectYarnIds = [...pendingProjectYarnIds, id];
   }
@@ -3176,8 +3176,28 @@ function setProjectYarnUsageYards(yarnId, yardsUsed){
   if(source!=='new' && !yarnScraps(STATE.yarns.find(y=>y.id===yarnId)||{}).some(c=>c.id===source)) delete _usedSourceMemory[yarnId];
   if(entry) entry.yardageUsed = newVal;
   else pendingProjectYarnUsage.push({ yarnId, yardageUsed: newVal });
+  commitProjectYarnUsage(yarnId);
   persist();
   refreshYarnPicker();
+}
+/* The stash change above is saved straight away, so the project's record of
+   it must be too. Otherwise closing the form without Save (Cancel, switching
+   tab, reloading) keeps the stash deduction but loses the project's usage.
+   Only for projects that already exist: a brand-new draft has nothing saved
+   yet, and discarding it hands the yardage back (cleanupOpenForms). */
+function commitProjectYarnUsage(yarnId){
+  const pid = STATE.editingProjectId;
+  if(!pid || !STATE.projects.some(p=>p.id===pid)) return;
+  const usage = pendingProjectYarnUsage.map(u=>({...u}));
+  STATE.projects = STATE.projects.map(p => {
+    if(p.id!==pid) return p;
+    const yarnIds = p.yarnIds || [];
+    const keepLink = usage.some(u=>u.yarnId===yarnId);
+    return { ...p, yarnUsage: usage,
+      yarnIds: keepLink ? (yarnIds.includes(yarnId) ? yarnIds : [...yarnIds, yarnId]) : yarnIds.filter(id=>id!==yarnId),
+      yarnRequired: keepLink ? p.yarnRequired : (p.yarnRequired||[]).filter(u=>u.yarnId!==yarnId),
+      updatedAt: new Date().toISOString() };
+  });
 }
 /* Session-only memory of the chosen entry unit (len/skeins/grams) per yarn
    in the project usage picker. Not persisted to Firebase — resets on reload
