@@ -730,3 +730,6 @@ textarea{ resize:vertical; }
 /* Brief highlight when jumping to a project from elsewhere */
 .project-row.flash{ animation: wg-flash 1.8s ease; }
 @keyframes wg-flash{ 0%,40%{ background:color-mix(in srgb, var(--lilac) 22%, transparent); } 100%{ background:transparent; } }
+/* Section heading between groups in a list (e.g. Finished projects). */
+.list-section-title{ margin:18px 2px 8px; font-size:0.78rem; font-weight:600; letter-spacing:0.04em; text-transform:uppercase; color:var(--ink-soft); }
+.wg-modal p{ white-space:pre-line; }
