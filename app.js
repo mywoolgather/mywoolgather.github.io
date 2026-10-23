@@ -2893,9 +2893,9 @@ function renderProjects(){
 
 /* Shared cleanup for both yarn and project forms. If a brand-new project
    draft is discarded: (1) free any stash yarns that were allocated to it,
-   and (2) give back any yardage that was deducted from stash during this
-   session, since none of that should stick to a project that was never
-   saved. Editing an *existing* project does not revert on cancel — yardage
+   and (2) clean up its uploaded photos. Its logged usage was never taken
+   off the stash (that happens on first save), so there's nothing to give
+   back. Editing an *existing* project does not revert on cancel — yardage
    already recorded as used represents real-world consumption, not a draft. */
 function cleanupOpenForms(){
   pendingShoppingToStashId = null;
@@ -2904,8 +2904,6 @@ function cleanupOpenForms(){
     STATE.yarns = STATE.yarns.map(y=>{
       let updated = y;
       if(y.allocatedTo===STATE.editingProjectId){ changed = true; updated = { ...updated, status:'available', allocatedTo:null }; }
-      const usage = pendingProjectYarnUsage.find(u=>u.yarnId===y.id);
-      if(usage && usage.yardageUsed){ changed = true; updated = { ...updated, yardageRemaining:(Number(updated.yardageRemaining)||0) + usage.yardageUsed }; }
       return updated;
     });
     if(changed) persist();
@@ -3048,7 +3046,7 @@ function removeProjectPhoto(i){
 
 /* Yarn picker: unlinked stash yarns show as tap-to-add chips; once linked,
    a yarn drops into its own row with live controls — yards used so far
-   (which actually deducts from stash as you go), allocate, remove-from-
+   (deducted from stash as you go; for a new project, on first save), allocate, remove-from-
    stash, and unlink. Rebuilt in isolation by refreshYarnPicker() so the
    rest of the project form is never touched. */
 function buildYarnPickerHTML(){
@@ -3070,7 +3068,8 @@ function buildYarnPickerHTML(){
     const req = pendingProjectYarnRequired.find(u=>u.yarnId===y.id);
     const required = req ? req.yardage : '';
     const reqNum = Number(required)||0;
-    const remaining = Number(y.yardageRemaining)||0;
+    // A draft's usage isn't off the stash yet, so show what will be left.
+    const remaining = (Number(y.yardageRemaining)||0) - (isDraftProject() ? used : 0);
     const shortfall = reqNum > remaining ? reqNum - remaining : 0;
     // Show the "used" value in whatever entry unit was last chosen this session
     // (skeins/grams/length), so the field doesn't snap back to length on re-render.
@@ -3113,13 +3112,14 @@ function toggleProjectYarn(id){
   const isLinked = pendingProjectYarnIds.includes(id);
   if(isLinked){
     const usage = pendingProjectYarnUsage.find(u=>u.yarnId===id);
-    if(usage && usage.yardageUsed){
+    const draft = isDraftProject();
+    if(usage && usage.yardageUsed && !draft){
       STATE.yarns = STATE.yarns.map(y => y.id===id ? { ...y, yardageRemaining:(Number(y.yardageRemaining)||0) + usage.yardageUsed } : y);
     }
     pendingProjectYarnUsage = pendingProjectYarnUsage.filter(u=>u.yarnId!==id);
     pendingProjectYarnRequired = pendingProjectYarnRequired.filter(u=>u.yarnId!==id);
     pendingProjectYarnIds = pendingProjectYarnIds.filter(x=>x!==id);
-    if(usage && usage.yardageUsed){ commitProjectYarnUsage(id); persist(); }
+    if(usage && usage.yardageUsed && !draft){ commitProjectYarnUsage(id); persist(); }
   } else {
     pendingProjectYarnIds = [...pendingProjectYarnIds, id];
   }
@@ -3169,6 +3169,14 @@ function setProjectYarnUsageYards(yarnId, yardsUsed){
   // scrap). Less used (a correction): give it back to the total.
   const srcEl = document.getElementById('usedsrc-'+yarnId);
   const source = srcEl ? srcEl.value : 'new';
+  // A new project that's never been saved doesn't touch the stash yet: its
+  // usage is taken off when it's first saved (applyDraftYarnUsage).
+  if(isDraftProject()){
+    if(entry){ entry.yardageUsed = newVal; entry.source = source; }
+    else pendingProjectYarnUsage.push({ yarnId, yardageUsed: newVal, source });
+    refreshYarnPicker();
+    return;
+  }
   STATE.yarns = STATE.yarns.map(y => {
     if(y.id!==yarnId) return y;
     return delta>0 ? applyYarnUse(y, delta, source) : { ...y, yardageRemaining:(Number(y.yardageRemaining)||0) - delta };
@@ -3180,6 +3188,17 @@ function setProjectYarnUsageYards(yarnId, yardsUsed){
   persist();
   refreshYarnPicker();
 }
+function isDraftProject(){
+  return !!STATE.editingProjectId && !STATE.projects.some(p=>p.id===STATE.editingProjectId);
+}
+/* First save of a new project: take each yarn's logged usage off the stash,
+   from the ball picked for it (a new skein or a scrap). */
+function applyDraftYarnUsage(){
+  pendingProjectYarnUsage.forEach(u=>{
+    if(!(u.yardageUsed>0)) return;
+    STATE.yarns = STATE.yarns.map(y => y.id===u.yarnId ? applyYarnUse(y, u.yardageUsed, u.source||'new') : y);
+  });
+}
 /* The stash change above is saved straight away, so the project's record of
    it must be too. Otherwise closing the form without Save (Cancel, switching
    tab, reloading) keeps the stash deduction but loses the project's usage.
@@ -3188,7 +3207,7 @@ function setProjectYarnUsageYards(yarnId, yardsUsed){
 function commitProjectYarnUsage(yarnId){
   const pid = STATE.editingProjectId;
   if(!pid || !STATE.projects.some(p=>p.id===pid)) return;
-  const usage = pendingProjectYarnUsage.map(u=>({...u}));
+  const usage = pendingProjectYarnUsage.map(({source, ...u})=>u);
   STATE.projects = STATE.projects.map(p => {
     if(p.id!==pid) return p;
     const yarnIds = p.yarnIds || [];
@@ -3480,7 +3499,7 @@ function handleSaveProject(e){
     garmentGender: document.getElementById('pf-garment-gender').value || null,
     paletteId: (document.getElementById('pf-palette') ? document.getElementById('pf-palette').value : (existing && existing.paletteId)) || null,
     yarnIds: [...pendingProjectYarnIds],
-    yarnUsage: pendingProjectYarnUsage.map(u=>({...u})),
+    yarnUsage: pendingProjectYarnUsage.map(({source, ...u})=>u),
     yarnRequired: pendingProjectYarnRequired.map(u=>({...u})),
     photos: [...pendingProjectPhotos],
     counters: pendingProjectCounters.map(c=>({...c})),
@@ -3489,6 +3508,7 @@ function handleSaveProject(e){
   if(existing){
     STATE.projects = STATE.projects.map(p => p.id===STATE.editingProjectId ? withStatusDates({ ...p, ...fields, updatedAt: new Date().toISOString() }) : p);
   } else {
+    applyDraftYarnUsage();
     STATE.projects.push(withStatusDates({ id: STATE.editingProjectId, ...fields, createdAt: todayStr(), updatedAt: new Date().toISOString() }));
   }
   syncPatternStatusFromProject(STATE.projects.find(p=>p.id===STATE.editingProjectId));
