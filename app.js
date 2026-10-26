@@ -192,6 +192,7 @@ let statusChartInstance = null;
 ================================================================= */
 async function persist(){
   if(!STATE.user) return;
+  STATE.yarns = STATE.yarns.map(autoScrapYarn);   // under one full ball → scrap, whatever changed it
   try{
     await window.FB.saveUserData(STATE.user.uid, { yarns: STATE.yarns, projects: STATE.projects, palettes: STATE.paletteSavedPalettes, shoppingList: STATE.shoppingList, patterns: STATE.patterns, prefs: {unitPref: STATE.unitPref, theme: STATE.theme, preferencesSetup: true, stashSort: STATE.stashSort, projSort: STATE.projSort, patternSort: STATE.patternSort} });
   }catch(e){
@@ -433,6 +434,33 @@ function applyYarnUse(y, yards, source){
   }
   return { ...y, scraps, yardageRemaining: (Number(y.yardageRemaining)||0) - yards };
 }
+/* Anything under one full ball becomes a scrap. If the full-skein part of a
+   yarn isn't a whole number of skeins (330 yd of a 220 yd skein, 1.5 skeins
+   entered, or yards given back by a correction), the leftover part is moved
+   into its own scrap. Length and weight go together through the skein specs,
+   so this covers both. Pure; returns the yarn unchanged when nothing moves. */
+function autoScrapYarn(y){
+  const sy = Number(y && y.skeinYardage)||0;
+  if(!(sy>0)) return y;
+  const full = Math.round(fullYards(y));
+  const part = full - Math.floor(full/sy)*sy;
+  if(part<1 || part>=sy) return y;
+  return { ...y, scraps:[...yarnScraps(y), { id: uid(), yards: Math.round(part) }] };
+}
+/* Give `yards` back to a yarn (less used than recorded). It tops up the most
+   recent scrap first, since that's the ball the yarn came out of; a scrap
+   that reaches a full skein counts as a full skein again. Pure. */
+function giveBackYarn(y, yards){
+  yards = Math.max(0, Math.round(Number(yards)||0));
+  const sy = Number(y.skeinYardage)||0;
+  let scraps = yarnScraps(y).map(c=>({ ...c }));
+  const last = scraps[scraps.length-1];
+  if(last && sy>0 && yards>0){
+    last.yards = (Number(last.yards)||0) + Math.min(yards, Math.max(0, sy - (Number(last.yards)||0)));
+    if(last.yards >= sy) scraps = scraps.slice(0, -1);
+  }
+  return autoScrapYarn({ ...y, scraps, yardageRemaining:(Number(y.yardageRemaining)||0) + yards });
+}
 /* Length units. Storage is always canonical yards; these convert only at the
    display/input edges based on the user's preference. */
 const YD_PER_M = 1.0936133;
@@ -471,23 +499,29 @@ function projectYardageUsed(p){
   }
   return Number(p.yardageUsed)||0;
 }
-/* Per-yarn yardage gap for a project: for each linked yarn with a "need"
-   set, shortfall = need − that yarn's remaining stock. Summed across all
-   linked yarns. Returns null if no per-yarn requirements are set. */
-function projectYardageGap(p){
-  const reqs = p.yarnRequired || [];
-  if(!reqs.length) return null;
-  let required=0, shortfall=0;
-  reqs.forEach(r=>{
+/* Per-yarn shortfall for a project. What's already been used on the project
+   has come off the stash, so it still needs (need − used), and it's short by
+   whatever of that the stash can't cover:
+       short = max(0, need − used − remaining in stash).
+   One entry per yarn with a "need" set. */
+function projectYarnGaps(p, yarns){
+  yarns = yarns || STATE.yarns;
+  return (p.yarnRequired||[]).map(r=>{
     const need = Number(r.yardage)||0;
-    if(!need) return;
-    required += need;
-    const y = STATE.yarns.find(yy=>yy.id===r.yarnId);
-    const have = y ? (Number(y.yardageRemaining)||0) : 0;
-    if(need > have) shortfall += (need - have);
-  });
+    if(!need) return null;
+    const yarn = yarns.find(y=>y.id===r.yarnId) || null;
+    const u = (p.yarnUsage||[]).find(uu=>uu.yarnId===r.yarnId);
+    const used = u ? (Number(u.yardageUsed)||0) : 0;
+    const have = yarn ? (Number(yarn.yardageRemaining)||0) : 0;
+    return { yarnId: r.yarnId, yarn, need, used, have, short: Math.max(0, Math.round(need - used - have)) };
+  }).filter(Boolean);
+}
+/* Summed across the project's yarns. Returns null if no per-yarn needs are set. */
+function projectYardageGap(p){
+  const gaps = projectYarnGaps(p);
+  const required = gaps.reduce((t,g)=>t+g.need, 0);
   if(required===0) return null;
-  return { required, gap: Math.max(0, shortfall) };
+  return { required, gap: gaps.reduce((t,g)=>t+g.short, 0) };
 }
 
 /* Color math */
@@ -2886,7 +2920,15 @@ function renderProjects(){
   if(list.length===0){
     html += `<div class="empty"><p class="title">No matches</p><p class="body">No projects match this filter.</p></div>`;
   } else {
-    html += `<div class="card">${list.map(renderProjectRow).join('')}</div>`;
+    // Active projects first; finished (and frogged) ones in their own section below.
+    const isDone = p => p.status==='Finished' || p.status==='Frogged';
+    const active = list.filter(p=>!isDone(p)), done = list.filter(isDone);
+    if(active.length) html += `<div class="card">${active.map(renderProjectRow).join('')}</div>`;
+    else if(!fs || fs==='All statuses') html += `<p class="note">No active projects — start one with "Add project".</p>`;
+    if(done.length){
+      const label = done.every(p=>p.status==='Frogged') ? 'Frogged' : done.some(p=>p.status==='Frogged') ? 'Finished & frogged' : 'Finished';
+      html += `<p class="list-section-title">${label} · ${done.length}</p><div class="card">${done.map(renderProjectRow).join('')}</div>`;
+    }
   }
   return html;
 }
@@ -3070,7 +3112,7 @@ function buildYarnPickerHTML(){
     const reqNum = Number(required)||0;
     // A draft's usage isn't off the stash yet, so show what will be left.
     const remaining = (Number(y.yardageRemaining)||0) - (isDraftProject() ? used : 0);
-    const shortfall = reqNum > remaining ? reqNum - remaining : 0;
+    const shortfall = Math.max(0, Math.round(reqNum - used - remaining));
     // Show the "used" value in whatever entry unit was last chosen this session
     // (skeins/grams/length), so the field doesn't snap back to length on re-render.
     const usedDisplay = yardsToUsedEntry(used, _usedModeMemory[y.id], y);
@@ -3100,7 +3142,8 @@ function buildYarnPickerHTML(){
           </select>
         </label>` : ''}
         <span class="note" style="font-size:0.7rem; white-space:nowrap;">${toDisplayLength(remaining)} ${unitLabel()} in stash</span>
-        ${shortfall>0 ? `<span class="note" style="font-size:0.7rem; color:var(--wine); white-space:nowrap;">short ${toDisplayLength(shortfall)} ${unitLabel()}</span>` : (reqNum>0 ? `<span class="note" style="font-size:0.7rem; color:var(--forest);">enough</span>` : '')}
+        ${shortfall>0 ? `<span class="note" style="font-size:0.7rem; color:var(--wine); white-space:nowrap;">short ${toDisplayLength(shortfall)} ${unitLabel()}</span>
+          <button type="button" class="btn btn-ghost btn-small" onclick="shopPickerYarnGap('${y.id}')" title="Add the ${toDisplayLength(shortfall)} ${unitLabel()} you're short to your shopping list">${ICONS.cart} Shop</button>` : (reqNum>0 ? `<span class="note" style="font-size:0.7rem; color:var(--forest);">enough</span>` : '')}
       </div>
     </div>`;
   }).join('');
@@ -3114,7 +3157,7 @@ function toggleProjectYarn(id){
     const usage = pendingProjectYarnUsage.find(u=>u.yarnId===id);
     const draft = isDraftProject();
     if(usage && usage.yardageUsed && !draft){
-      STATE.yarns = STATE.yarns.map(y => y.id===id ? { ...y, yardageRemaining:(Number(y.yardageRemaining)||0) + usage.yardageUsed } : y);
+      STATE.yarns = STATE.yarns.map(y => y.id===id ? giveBackYarn(y, usage.yardageUsed) : y);
     }
     pendingProjectYarnUsage = pendingProjectYarnUsage.filter(u=>u.yarnId!==id);
     pendingProjectYarnRequired = pendingProjectYarnRequired.filter(u=>u.yarnId!==id);
@@ -3179,7 +3222,7 @@ function setProjectYarnUsageYards(yarnId, yardsUsed){
   }
   STATE.yarns = STATE.yarns.map(y => {
     if(y.id!==yarnId) return y;
-    return delta>0 ? applyYarnUse(y, delta, source) : { ...y, yardageRemaining:(Number(y.yardageRemaining)||0) - delta };
+    return delta>0 ? applyYarnUse(y, delta, source) : giveBackYarn(y, -delta);
   });
   if(source!=='new' && !yarnScraps(STATE.yarns.find(y=>y.id===yarnId)||{}).some(c=>c.id===source)) delete _usedSourceMemory[yarnId];
   if(entry) entry.yardageUsed = newVal;
@@ -3511,7 +3554,8 @@ function handleSaveProject(e){
     applyDraftYarnUsage();
     STATE.projects.push(withStatusDates({ id: STATE.editingProjectId, ...fields, createdAt: todayStr(), updatedAt: new Date().toISOString() }));
   }
-  syncPatternStatusFromProject(STATE.projects.find(p=>p.id===STATE.editingProjectId));
+  const savedId = STATE.editingProjectId;
+  syncPatternStatusFromProject(STATE.projects.find(p=>p.id===savedId));
   persist();
   STATE.showProjectForm = false;
   STATE.editingProjectId = null;
@@ -3521,6 +3565,7 @@ function handleSaveProject(e){
   pendingProjectCounters = [];
   renderTab();
   scrollToTop();
+  offerProjectGapShopping(savedId);
 }
 
 async function deleteProject(id){
@@ -3735,24 +3780,78 @@ function resetCounter(projectId, counterId){
   persistSoon();
   renderTab();
 }
-/* Push a project's yardage gap onto the shopping list. Records the source
-   (this project) for future dedup, but the shopping list shows it cleanly. */
+/* A stash yarn that isn't enough on its own goes on the shopping list as a
+   top-up: more of that same yarn (colour, weight, fiber, skeins to buy), for
+   the project that needs it. One item per project + yarn; sending it again
+   updates the amount instead of adding a duplicate. */
+function projectGapShoppingFields(p, g){
+  const y = g.yarn, sy = y ? (Number(y.skeinYardage)||0) : 0;
+  return {
+    colorName: y ? ([y.colorway, y.colorwayNumber ? '#'+y.colorwayNumber : ''].filter(Boolean).join(' ') || null) : null,
+    hex: y ? (y.colorHex||null) : null,
+    weight: y ? (y.weightCategory||null) : null,
+    fiber: y ? (y.fiber||null) : null,
+    yardage: g.short,
+    quantity: sy>0 ? Math.ceil(g.short/sy) : 1,
+    note: y ? `More of ${yarnDisplayName(y)} to finish ${p.name}` : `To finish ${p.name}`,
+    sourceType: 'project', sourceId: p.id, sourceName: p.name,
+    yarnId: y ? y.id : null
+  };
+}
+function findProjectGapItem(projectId, yarnId){
+  return STATE.shoppingList.find(i=>!i.done && i.sourceType==='project' && i.sourceId===projectId && (i.yarnId||null)===(yarnId||null));
+}
+/* Returns true if the list changed. */
+function upsertProjectGapItem(p, g){
+  const fields = projectGapShoppingFields(p, g);
+  const existing = findProjectGapItem(p.id, fields.yarnId);
+  if(existing){
+    if(existing.yardage===fields.yardage && existing.quantity===fields.quantity) return false;
+    STATE.shoppingList = STATE.shoppingList.map(i=>i.id===existing.id ? { ...i, ...fields } : i);
+    persist();
+    return true;
+  }
+  addShoppingItem(fields);
+  return true;
+}
 function shopProjectGap(id){
   if(!STATE.online){ wgToast("You're offline — adding to the shopping list needs a connection.", "error"); return; }
   const p = STATE.projects.find(pp=>pp.id===id);
-  const gapInfo = projectYardageGap(p);
-  if(!p || !gapInfo || gapInfo.gap<=0) return;
-  // Infer weight from the project's linked yarns if consistent.
-  const linked = STATE.yarns.filter(y=>(p.yarnIds||[]).includes(y.id));
-  const weights = [...new Set(linked.map(y=>y.weightCategory).filter(Boolean))];
-  addShoppingItem({
-    weight: weights.length===1 ? weights[0] : null,
-    yardage: Math.round(gapInfo.gap),
-    quantity: 1,
-    note: 'Project gap',
-    sourceType: 'project', sourceId: p.id, sourceName: p.name
-  });
-  wgToast(`Added ~${toDisplayLength(gapInfo.gap)} ${unitLabel()} to your shopping list for "${p.name}".`, "success");
+  const gaps = p ? projectYarnGaps(p).filter(g=>g.short>0) : [];
+  if(!gaps.length) return;
+  gaps.forEach(g=>upsertProjectGapItem(p, g));
+  const total = gaps.reduce((t,g)=>t+g.short, 0);
+  wgToast(`Added ~${toDisplayLength(total)} ${unitLabel()} to your shopping list for "${p.name}".`, "success");
+  renderTab();
+}
+/* From the yarn row in the project form (saved or still a draft). */
+function shopPickerYarnGap(yarnId){
+  if(!STATE.online){ wgToast("You're offline — adding to the shopping list needs a connection.", "error"); return; }
+  const yarn = STATE.yarns.find(y=>y.id===yarnId);
+  const req = pendingProjectYarnRequired.find(u=>u.yarnId===yarnId);
+  const usage = pendingProjectYarnUsage.find(u=>u.yarnId===yarnId);
+  if(!yarn || !req) return;
+  const used = usage ? (Number(usage.yardageUsed)||0) : 0;
+  const remaining = (Number(yarn.yardageRemaining)||0) - (isDraftProject() ? used : 0);
+  const short = Math.max(0, Math.round((Number(req.yardage)||0) - used - remaining));
+  if(!short) return;
+  const nameEl = document.getElementById('pf-name');
+  const p = { id: STATE.editingProjectId, name: (nameEl && nameEl.value.trim()) || 'a new project' };
+  upsertProjectGapItem(p, { yarn, short });
+  wgToast(`Added ~${toDisplayLength(short)} ${unitLabel()} of ${yarnDisplayName(yarn)} to your shopping list.`, "success");
+}
+/* After saving a project: if a yarn on it won't be enough on its own and
+   isn't on the shopping list for it yet, offer to add the rest. */
+async function offerProjectGapShopping(id){
+  const p = STATE.projects.find(pp=>pp.id===id);
+  if(!p || !STATE.online || p.status==='Finished' || p.status==='Frogged') return;
+  const gaps = projectYarnGaps(p).filter(g=>g.short>0 && g.yarn && !findProjectGapItem(p.id, g.yarnId));
+  if(!gaps.length) return;
+  const lines = gaps.map(g=>`${yarnDisplayName(g.yarn)}: short ${toDisplayLength(g.short)} ${unitLabel()}`).join('\n');
+  const msg = `${gaps.length===1 ? "This yarn isn't" : "These yarns aren't"} enough on ${gaps.length===1?'its':'their'} own to finish "${p.name}":\n${lines}\n\nAdd the rest to your shopping list?`;
+  if(!(await wgConfirm(msg, { title:'Not enough yarn', okLabel:'Add to shopping list' }))) return;
+  gaps.forEach(g=>upsertProjectGapItem(p, g));
+  wgToast(`Added ${gaps.length} item${gaps.length===1?'':'s'} to your shopping list.`, 'success');
   renderTab();
 }
 
@@ -7066,7 +7165,7 @@ function initApp(){
     try{
       const data = await window.FB.loadUserData(user.uid);
 
-      STATE.yarns = ((data && data.yarns) || []).map(normalizeLegacyYarn);
+      STATE.yarns = ((data && data.yarns) || []).map(normalizeLegacyYarn).map(autoScrapYarn);
       STATE.projects = (data && data.projects) || [];
       STATE.paletteSavedPalettes = (data && data.palettes) || [];
       STATE.shoppingList = (data && data.shoppingList) || [];

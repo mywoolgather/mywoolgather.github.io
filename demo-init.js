@@ -162,9 +162,15 @@
     bar.innerHTML = '<span><strong>Live demo</strong> — sample data, nothing saves. Explore every feature freely.</span>'
       + '<a href="'+window.WG_SIGNUP_URL+'" style="background:#fff;color:#5C3A72;text-decoration:none;font-weight:600;border-radius:6px;padding:4px 12px;white-space:nowrap;">Create your gathering →</a>';
     document.body.appendChild(bar);
-    // Push app content down so the banner never covers the header.
+    // Push app content (and full-screen forms, whose Save/Cancel bar is at
+    // the top) down by the banner's real height, which grows when it wraps
+    // onto two lines on a phone.
     const wrapFix = document.createElement('style');
-    wrapFix.textContent = '.wrap{ padding-top:52px !important; } .mobile-nav{ } ';
+    wrapFix.textContent = '.wrap{ padding-top:calc(var(--demo-bar, 52px) + 8px) !important; } .fullscreen-form{ top:var(--demo-bar, 52px) !important; }';
     document.head.appendChild(wrapFix);
+    const setBarHeight = () => document.documentElement.style.setProperty('--demo-bar', bar.offsetHeight + 'px');
+    setBarHeight();
+    if(window.ResizeObserver) new ResizeObserver(setBarHeight).observe(bar);
+    else window.addEventListener('resize', setBarHeight);
   });
 })();

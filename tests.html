@@ -150,6 +150,38 @@
     ok('grams ↔ yards', gramsToYards(base, 33)===73 && yardsToGrams(base, 73)===33);
   }catch(e){ ok('scraps block threw: '+e.message, false); }
 
+  // --- Auto-scrap: anything under one full ball becomes a scrap ---
+  try{
+    const base = { skeinYardage:220, skeinWeightGrams:100 };
+    const a = autoScrapYarn({ ...base, yardageRemaining:330, scraps:[] });
+    ok('auto-scrap: 1.5 skeins → 110 yd scrap, 1 full', a.scraps.length===1 && a.scraps[0].yards===110 && fullSkeinCount(a)===1);
+    const b = autoScrapYarn({ ...base, yardageRemaining:150, scraps:[] });
+    ok('auto-scrap: under one ball → all of it is a scrap', b.scraps.length===1 && b.scraps[0].yards===150 && fullYards(b)===0);
+    const c = { ...base, yardageRemaining:440, scraps:[] };
+    ok('auto-scrap: whole skeins unchanged', autoScrapYarn(c)===c);
+    const d = { ...base, yardageRemaining:300, scraps:[{id:'s',yards:80}] };
+    ok('auto-scrap: already tracked scrap unchanged', autoScrapYarn(d)===d);
+    ok('auto-scrap: idempotent', autoScrapYarn(a).scraps.length===1);
+    ok('auto-scrap: no skein length → unchanged', autoScrapYarn({ yardageRemaining:90, scraps:[] }).scraps.length===0);
+    const e = giveBackYarn({ ...base, yardageRemaining:290, scraps:[{id:'s',yards:70}] }, 50);
+    ok('give back tops up the last scrap', e.yardageRemaining===340 && e.scraps.length===1 && e.scraps[0].yards===120);
+    const f = giveBackYarn({ ...base, yardageRemaining:390, scraps:[{id:'s',yards:170}] }, 50);
+    ok('give back to a full ball → scrap gone', f.yardageRemaining===440 && f.scraps.length===0);
+    const g = giveBackYarn({ ...base, yardageRemaining:440, scraps:[] }, 30);
+    ok('give back with no scraps → small scrap', g.yardageRemaining===470 && g.scraps.length===1 && g.scraps[0].yards===30);
+  }catch(e){ ok('auto-scrap block threw: '+e.message, false); }
+
+  // --- Project gaps: what's used already came off the stash ---
+  try{
+    const yarns = [{ id:'a', yardageRemaining:150 }, { id:'b', yardageRemaining:100 }];
+    const p = { yarnRequired:[{yarnId:'a', yardage:400},{yarnId:'b', yardage:300}], yarnUsage:[{yarnId:'a', yardageUsed:300}] };
+    const gaps = projectYarnGaps(p, yarns);
+    ok('gap: 400 need, 300 used, 150 left → enough', gaps.find(g=>g.yarnId==='a').short===0);
+    ok('gap: 300 need, none used, 100 left → short 200', gaps.find(g=>g.yarnId==='b').short===200);
+    ok('gap: missing yarn → whole need short', projectYarnGaps({ yarnRequired:[{yarnId:'z', yardage:90}] }, yarns)[0].short===90);
+    ok('gap: no needs → none', projectYarnGaps({}, yarns).length===0);
+  }catch(e){ ok('project gap block threw: '+e.message, false); }
+
   // --- Order import (rule-based, no AI) ---
   try{
     const brands = ['Malabrigo','Drops','Cascade Yarns','Lion Brand','Knit Picks'];
